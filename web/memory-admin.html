@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>memory gateway</title>
+<link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,300;1,400&family=DM+Mono:wght@300;400&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #262624; --bg-card: #2e2e2b; --bg-hover: #33332f; --text: #e8e0d4; --text-muted: #8a8478;
+  --accent: #d97757; --accent-glow: rgba(217,119,87,.12); --border: rgba(255,255,255,.06);
+  --border-accent: rgba(217,119,87,.25);
+  --font-serif: 'Cormorant Garamond', Georgia, serif;
+  --font-mono: 'DM Mono', 'Menlo', monospace;
+  --ease-out: cubic-bezier(.2,.9,.3,1);
+  --radius: 8px;
+  --t1: #e8a87c; --t2: #d97757; --t3: #8a8478; --t4: #555550;
+}
+[data-theme="light"] {
+  --bg: #f5f2ed; --bg-card: #ffffff; --bg-hover: #faf8f5; --text: #2e2c28; --text-muted: #8a8478;
+  --accent: #c96a48; --accent-glow: rgba(201,106,72,.1); --border: rgba(0,0,0,.08);
+  --border-accent: rgba(201,106,72,.3);
+  --t1: #c96a48; --t2: #d97757; --t3: #8a8478; --t4: #bbb8b0;
+}
+[data-theme="light"] .mem-card { box-shadow: 0 1px 3px rgba(0,0,0,.04); }
+[data-theme="light"] .stat-card { box-shadow: 0 1px 3px rgba(0,0,0,.04); }
+[data-theme="light"] .chart-card { box-shadow: 0 1px 3px rgba(0,0,0,.04); }
+[data-theme="light"] select { background: #fff; }
+[data-theme="light"] .sort-dir-btn { background: #fff; }
+[data-theme="light"] .search-box { background: rgba(0,0,0,.02); }
+[data-theme="light"] .mem-badge.pinned { background: rgba(201,106,72,.08); }
+[data-theme="light"] .mem-tier { background: rgba(0,0,0,.04); }
+[data-theme="light"] .mem-tier.t1 { background: rgba(201,106,72,.1); }
+[data-theme="light"] .mem-tier.t2 { background: rgba(217,119,87,.08); }
+.theme-toggle { background:none; border:1px solid var(--border); border-radius:var(--radius); width:32px; height:32px; font-size:1rem; cursor:pointer; color:var(--text-muted); display:flex; align-items:center; justify-content:center; transition:all .2s; margin-left:auto; }
+.theme-toggle:hover { border-color:var(--accent); color:var(--accent); }
+
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:var(--bg); color:var(--text); font-family:var(--font-mono); font-size:13px; min-height:100vh; }
+
+.header { padding:24px 28px 18px; display:flex; align-items:baseline; gap:16px; flex-wrap:wrap; }
+.header h1 { font-family:var(--font-serif); font-weight:300; font-size:1.7rem; letter-spacing:.02em; color:var(--text); }
+.header h1 span { color:var(--accent); }
+
+/* Stats Dashboard */
+.dashboard { padding:0 28px 16px; display:grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap:12px; }
+.stat-card { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); padding:16px; }
+.stat-card .stat-val { font-size:1.8rem; font-family:var(--font-serif); font-weight:400; color:var(--accent); line-height:1; }
+.stat-card .stat-label { font-size:.6rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:.1em; margin-top:4px; }
+.stat-card .stat-sub { font-size:.65rem; color:var(--text-muted); margin-top:6px; }
+
+/* Charts */
+.charts-row { padding:0 28px 16px; display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+@media (max-width: 700px) { .charts-row { grid-template-columns: 1fr; } }
+.chart-card { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); padding:16px; }
+.chart-card h3 { font-family:var(--font-serif); font-weight:300; font-size:1rem; color:var(--text-muted); margin-bottom:12px; }
+.bar-chart { display:flex; flex-direction:column; gap:6px; }
+.bar-row { display:flex; align-items:center; gap:8px; }
+.bar-label { font-size:.65rem; color:var(--text-muted); min-width:60px; text-align:right; }
+.bar-track { flex:1; height:18px; background:rgba(255,255,255,.03); border-radius:3px; overflow:hidden; position:relative; }
+.bar-fill { height:100%; border-radius:3px; transition:width .5s var(--ease-out); }
+.bar-val { position:absolute; right:6px; top:50%; transform:translateY(-50%); font-size:.6rem; color:var(--text); }
+.heat-spectrum { display:flex; gap:2px; height:24px; align-items:flex-end; }
+.heat-bar { flex:1; background:var(--accent); border-radius:2px 2px 0 0; transition:height .4s var(--ease-out); min-width:3px; opacity:.7; }
+
+.tabs { display:flex; gap:0; padding:0 28px; border-bottom:1px solid var(--border); }
+.tab { padding:10px 18px; font-family:var(--font-mono); font-size:.7rem; color:var(--text-muted); cursor:pointer; border-bottom:2px solid transparent; transition:all .2s; letter-spacing:.04em; }
+.tab:hover { color:var(--text); }
+.tab.active { color:var(--accent); border-bottom-color:var(--accent); }
+
+.toolbar { padding:14px 28px; display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+.search-box { flex:1; min-width:180px; background:rgba(255,255,255,.03); border:1px solid var(--border); border-radius:var(--radius); padding:8px 14px; font-family:var(--font-mono); font-size:.75rem; color:var(--text); outline:none; transition:border-color .2s; }
+.search-box:focus { border-color:var(--accent); }
+.search-box::placeholder { color:var(--text-muted); opacity:.4; font-style:italic; }
+select { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); padding:7px 12px; font-family:var(--font-mono); font-size:.7rem; color:var(--text); outline:none; cursor:pointer; }
+select:focus { border-color:var(--accent); }
+.sort-dir-btn { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); width:32px; height:32px; font-size:.85rem; color:var(--text-muted); cursor:pointer; transition:all .2s var(--ease-out); display:flex; align-items:center; justify-content:center; }
+.sort-dir-btn:hover { border-color:var(--accent); color:var(--accent); }
+
+.content { padding:12px 28px; display:flex; flex-direction:column; gap:8px; }
+
+.mem-card { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); padding:16px 18px; cursor:pointer; transition:all .25s var(--ease-out); position:relative; }
+.mem-card:hover { border-color:var(--border-accent); background:var(--bg-hover); box-shadow:0 2px 12px rgba(0,0,0,.15); }
+.mem-card.expanded { border-color:var(--accent); box-shadow:0 4px 20px rgba(217,119,87,.08); }
+.mem-top { display:flex; align-items:center; gap:10px; margin-bottom:8px; flex-wrap:wrap; }
+.mem-heat { width:40px; height:3px; border-radius:2px; background:rgba(255,255,255,.05); overflow:hidden; flex-shrink:0; }
+.mem-heat-bar { height:100%; border-radius:2px; background:var(--accent); transition:width .3s; }
+.mem-heat-val { font-size:.6rem; color:var(--text-muted); min-width:32px; }
+.mem-tier { font-size:.55rem; padding:2px 7px; border-radius:4px; background:rgba(255,255,255,.04); color:var(--text-muted); }
+.mem-tier.t1 { background:rgba(232,168,124,.15); color:var(--t1); }
+.mem-tier.t2 { background:rgba(217,119,87,.12); color:var(--t2); }
+.mem-badges { display:flex; gap:4px; }
+.mem-badge { font-size:.55rem; padding:1px 6px; border-radius:3px; }
+.mem-badge.pinned { background:rgba(217,119,87,.12); color:var(--accent); }
+.mem-badge.resolved { background:rgba(100,100,100,.2); color:var(--text-muted); }
+.mem-date { font-size:.6rem; color:var(--text-muted); margin-left:auto; }
+.mem-summary { font-family:var(--font-serif); font-size:.92rem; line-height:1.55; color:var(--text); }
+.mem-tags { display:flex; gap:4px; flex-wrap:wrap; margin-top:6px; }
+.mem-tag { font-size:.55rem; padding:1px 6px; border-radius:3px; background:rgba(255,255,255,.04); color:var(--text-muted); }
+.mem-detail { display:none; margin-top:14px; padding-top:14px; border-top:1px solid var(--border); }
+.mem-card.expanded .mem-detail { display:block; }
+.mem-doc { font-family:var(--font-serif); font-size:.82rem; line-height:1.65; color:var(--text); white-space:pre-wrap; max-height:300px; overflow-y:auto; }
+.mem-meta-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(140px,1fr)); gap:8px; margin-top:12px; }
+.mem-meta-item { display:flex; flex-direction:column; gap:2px; }
+.mem-meta-item label { font-size:.55rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:.08em; }
+.mem-meta-item span { font-size:.72rem; color:var(--text); }
+.mem-actions { display:flex; gap:6px; margin-top:12px; flex-wrap:wrap; }
+.mem-btn { background:rgba(255,255,255,.04); border:1px solid var(--border); border-radius:var(--radius); padding:5px 12px; font-family:var(--font-mono); font-size:.65rem; color:var(--text-muted); cursor:pointer; transition:all .2s; }
+.mem-btn:hover { border-color:var(--accent); color:var(--accent); }
+.mem-btn.danger { color:#a05; }
+.mem-btn.danger:hover { border-color:#a05; background:rgba(170,0,85,.08); }
+
+.score-badge { font-size:.55rem; padding:2px 7px; border-radius:4px; background:rgba(217,119,87,.08); color:var(--accent); }
+.bm25-badge { font-size:.55rem; padding:2px 7px; border-radius:4px; background:rgba(100,180,100,.1); color:#8cb88c; }
+
+.pagination { display:flex; justify-content:center; gap:8px; padding:16px 28px; align-items:center; }
+.pagination button { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); padding:6px 12px; font-family:var(--font-mono); font-size:.7rem; color:var(--text-muted); cursor:pointer; }
+.pagination button:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
+.pagination button:disabled { opacity:.3; cursor:default; }
+.pagination span { font-size:.7rem; color:var(--text-muted); }
+
+.empty-state { text-align:center; padding:40px 20px; color:var(--text-muted); font-family:var(--font-serif); font-size:.9rem; font-style:italic; }
+
+.tab-panel { display:none; }
+.tab-panel.active { display:block; }
+
+/* Inline memories tab */
+.inline-card { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); padding:12px 16px; }
+.inline-card:hover { border-color:var(--border-accent); }
+.inline-top { display:flex; gap:8px; align-items:center; margin-bottom:6px; }
+.inline-cat { font-size:.6rem; color:var(--accent); background:var(--accent-glow); padding:1px 6px; border-radius:3px; }
+.inline-date { font-size:.6rem; color:var(--text-muted); margin-left:auto; }
+.inline-body { font-family:var(--font-serif); font-size:.85rem; line-height:1.5; color:var(--text); }
+.inline-actions { display:flex; gap:6px; margin-top:8px; }
+
+#toast { position:fixed; bottom:20px; right:20px; background:var(--bg-card); border:1px solid var(--accent); color:var(--accent); padding:8px 16px; border-radius:var(--radius); font-size:.7rem; opacity:0; transition:opacity .3s; pointer-events:none; z-index:999; }
+#toast.show { opacity:1; }
+
+/* Models panel */
+.models-grid { padding:0 28px 16px; display:grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap:12px; margin-top:16px; }
+.model-card { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); padding:20px; transition:all .25s var(--ease-out); }
+.model-card:hover { border-color:var(--border-accent); box-shadow:0 2px 12px rgba(0,0,0,.15); }
+.model-card .model-label { font-size:.6rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:.1em; margin-bottom:8px; }
+.model-card .model-name { font-family:var(--font-serif); font-size:1.15rem; font-weight:400; color:var(--accent); line-height:1.3; margin-bottom:12px; }
+.model-card .model-meta { display:flex; flex-direction:column; gap:6px; }
+.model-card .model-meta-row { display:flex; justify-content:space-between; align-items:center; }
+.model-card .model-meta-key { font-size:.6rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:.06em; }
+.model-card .model-meta-val { font-size:.72rem; color:var(--text); }
+.model-card .model-desc { font-family:var(--font-serif); font-size:.8rem; color:var(--text-muted); line-height:1.5; margin-top:10px; padding-top:10px; border-top:1px solid var(--border); font-style:italic; }
+
+.model-fields { display:flex; flex-direction:column; gap:10px; }
+.model-field { display:flex; flex-direction:column; gap:3px; }
+.model-field label { font-size:.6rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:.06em; }
+.model-input { background:rgba(255,255,255,.03); border:1px solid var(--border); border-radius:var(--radius); padding:8px 12px; font-family:var(--font-mono); font-size:.75rem; color:var(--text); outline:none; transition:border-color .2s; }
+.model-input:focus { border-color:var(--accent); }
+.model-actions { margin-top:14px; display:flex; gap:8px; justify-content:flex-end; }
+.model-actions .mem-btn { color:var(--accent); border-color:var(--border-accent); }
+.model-actions .mem-btn:hover { background:var(--accent-glow); }
+[data-theme="light"] .model-input { background:rgba(0,0,0,.02); }
+
+
+
+/* Edit modal */
+.modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:100; justify-content:center; align-items:center; }
+.modal-overlay.show { display:flex; }
+.modal { background:var(--bg-card); border:1px solid var(--border); border-radius:12px; padding:24px; width:90%; max-width:600px; max-height:80vh; overflow-y:auto; }
+.modal h3 { font-family:var(--font-serif); font-weight:300; font-size:1.1rem; color:var(--text); margin-bottom:16px; }
+.modal textarea { width:100%; min-height:120px; resize:vertical; background:rgba(255,255,255,.03); border:1px solid var(--border); border-radius:var(--radius); padding:10px; font-family:var(--font-serif); font-size:.85rem; line-height:1.5; color:var(--text); outline:none; }
+.modal textarea:focus { border-color:var(--accent); }
+.modal-actions { display:flex; gap:8px; margin-top:14px; justify-content:flex-end; }
+
+/* Architecture doc */
+.arch-wrap { max-width:860px; margin:0 auto; padding:20px 28px 60px; }
+.arch-meta { font-size:.6rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:.1em; margin-bottom:16px; }
+.arch-body h1 { font-family:var(--font-serif); font-weight:300; font-size:1.6rem; color:var(--text); margin:8px 0 14px; }
+.arch-body h1:first-child { margin-top:0; }
+.arch-body h2 { font-family:var(--font-serif); font-weight:400; font-size:1.15rem; color:var(--accent); margin:28px 0 10px; padding-bottom:6px; border-bottom:1px solid var(--border); }
+.arch-body h3 { font-family:var(--font-serif); font-weight:400; font-size:.95rem; color:var(--text); margin:18px 0 8px; }
+.arch-body p { font-family:var(--font-serif); font-size:.92rem; line-height:1.7; color:var(--text); margin:8px 0; }
+.arch-body strong { color:var(--accent); font-weight:500; }
+.arch-body code { font-family:var(--font-mono); font-size:.72rem; background:rgba(255,255,255,.05); border:1px solid var(--border); border-radius:4px; padding:1px 5px; color:var(--t1); }
+[data-theme="light"] .arch-body code { background:rgba(0,0,0,.04); }
+.arch-body pre { background:var(--bg-card); border:1px solid var(--border); border-radius:var(--radius); padding:14px 16px; overflow-x:auto; margin:10px 0; }
+.arch-body pre code { background:none; border:none; padding:0; font-size:.68rem; line-height:1.55; color:var(--text); white-space:pre; }
+.arch-body blockquote { border-left:2px solid var(--accent); padding:4px 0 4px 14px; margin:10px 0; }
+.arch-body blockquote p { color:var(--text-muted); font-style:italic; margin:0; }
+.arch-body ul { margin:8px 0 8px 4px; list-style:none; }
+.arch-body li { font-family:var(--font-serif); font-size:.9rem; line-height:1.65; color:var(--text); padding-left:16px; position:relative; margin:3px 0; }
+.arch-body li::before { content:'·'; color:var(--accent); position:absolute; left:2px; }
+.arch-body table { border-collapse:collapse; width:100%; margin:10px 0; font-size:.75rem; }
+.arch-body th { font-family:var(--font-mono); font-size:.6rem; text-transform:uppercase; letter-spacing:.08em; color:var(--text-muted); text-align:left; padding:6px 10px; border-bottom:1px solid var(--border-accent); }
+.arch-body td { font-family:var(--font-serif); font-size:.82rem; line-height:1.5; padding:6px 10px; border-bottom:1px solid var(--border); color:var(--text); vertical-align:top; }
+.arch-body hr { border:none; border-top:1px solid var(--border); margin:20px 0; }
+
+.nav-bar { display:flex; gap:0; padding:0 28px; border-bottom:1px solid var(--border); background:var(--bg); position:sticky; top:0; z-index:10; }
+.nav-link { padding:10px 18px; font-family:var(--font-mono); font-size:.7rem; color:var(--text-muted); text-decoration:none; border-bottom:2px solid transparent; transition:all .2s; letter-spacing:.04em; }
+.nav-link:hover { color:var(--text); }
+.nav-link.active { color:var(--accent); border-bottom-color:var(--accent); }
+</style>
+</head>
+<body>
+<nav class="nav-bar">
+  <a href="/raffaello/memory-admin/" class="nav-link active">memory</a>
+  <a href="/raffaello/gateway-admin/" class="nav-link">gateway</a>
+</nav>
+<div class="header">
+  <h1>memory <span>gateway</span></h1>
+  <button class="theme-toggle" onclick="toggleTheme()" id="themeBtn" title="toggle theme"></button>
+</div>
+
+<div class="dashboard" id="dashboard"></div>
+<div class="charts-row" id="chartsRow"></div>
+
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('memories',this)">memories</div>
+  <div class="tab" onclick="switchTab('models',this)">models</div>
+  <div class="tab" onclick="switchTab('arch',this)">architecture</div>
+</div>
+
+<div class="tab-panel active" id="panel-memories">
+  <div class="toolbar">
+    <input class="search-box" id="searchInput" placeholder="semantic + keyword search..." onkeydown="if(event.key==='Enter'){currentPage=0;loadMemories()}" />
+    <select id="sortSelect" onchange="currentPage=0;loadMemories()">
+      <option value="heat">heat</option>
+      <option value="date">date</option>
+      <option value="access_count">access</option>
+      <option value="tier">tier</option>
+      <option value="importance">importance</option>
+    </select>
+    <button class="sort-dir-btn" id="sortDirBtn" onclick="toggleSortDir()"></button>
+    <select id="tierFilter" onchange="currentPage=0;loadMemories()">
+      <option value="">all tiers</option>
+      <option value="1">T1 core</option>
+      <option value="2">T2 habits</option>
+      <option value="3">T3 diary</option>
+      <option value="4">T4 misc</option>
+    </select>
+  </div>
+  <div class="content" id="memList"></div>
+  <div class="pagination" id="pagination"></div>
+</div>
+
+
+
+<div class="tab-panel" id="panel-models">
+  <div class="models-grid" id="modelsGrid">
+    <div class="empty-state">loading models...</div>
+  </div>
+</div>
+
+<div class="tab-panel" id="panel-arch">
+  <div class="arch-wrap">
+    <div class="arch-meta" id="archMeta"></div>
+    <div class="arch-body" id="archBody"><div class="empty-state">loading architecture doc...</div></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="editModal">
+  <div class="modal">
+    <h3 id="editTitle">Edit Memory</h3>
+    <textarea id="editContent"></textarea>
+    <div class="modal-actions">
+      <button class="mem-btn" onclick="closeEditModal()">cancel</button>
+      <button class="mem-btn" style="color:var(--accent);border-color:var(--accent)" onclick="saveEdit()">save</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+const gwBase = window.location.origin + '/raffaello/memory-admin/api';
+let currentPage = 0, pageSize = 20, totalMems = 0;
+let sort = 'heat', sortOrder = 'desc';
+let editingId = null;
+
+async function fetchGW(path, opts) {
+  const url = gwBase + path;
+  return fetch(url, opts);
+}
+
+function switchTab(name, el) {
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('panel-' + name).classList.add('active');
+  if (name === 'auto') loadInlineMemories();
+  if (name === 'models') loadModels();
+  if (name === 'arch') loadArch();
+}
+
+// ── Architecture doc ──
+let archLoaded = false;
+async function loadArch() {
+  if (archLoaded) return;
+  try {
+    const r = await fetchGW('/architecture');
+    const d = await r.json();
+    if (d.error) throw new Error(d.error);
+    document.getElementById('archMeta').textContent = 'ARCHITECTURE.md · updated ' + (d.updated || '?');
+    document.getElementById('archBody').innerHTML = renderMd(d.markdown);
+    archLoaded = true;
+  } catch(e) {
+    document.getElementById('archBody').innerHTML = '<div class="empty-state">failed to load ARCHITECTURE.md — ' + escHtml(e.message) + '</div>';
+  }
+}
+
+function renderMd(md) {
+  const lines = md.split('\n');
+  const out = [];
+  let i = 0, para = [], list = [];
+  const flushPara = () => { if (para.length) { out.push('<p>' + inline(para.join(' ')) + '</p>'); para = []; } };
+  const flushList = () => { if (list.length) { out.push('<ul>' + list.map(l => '<li>' + inline(l) + '</li>').join('') + '</ul>'); list = []; } };
+  const flush = () => { flushPara(); flushList(); };
+
+  function inline(s) {
+    s = escHtml(s);
+    s = s.replace(/`([^`]+)`/g, (_, c) => '<code>' + c + '</code>');
+    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" style="color:var(--accent)">$1</a>');
+    return s;
+  }
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    if (line.startsWith('```')) {
+      flush();
+      const buf = [];
+      i++;
+      while (i < lines.length && !lines[i].startsWith('```')) { buf.push(lines[i]); i++; }
+      out.push('<pre><code>' + escHtml(buf.join('\n')) + '</code></pre>');
+      i++; continue;
+    }
+    if (/^\|.*\|\s*$/.test(line)) {
+      flush();
+      const rows = [];
+      while (i < lines.length && /^\|.*\|\s*$/.test(lines[i])) { rows.push(lines[i]); i++; }
+      const cells = r => r.replace(/^\||\|\s*$/g, '').split('|').map(c => c.trim());
+      let html = '<table>';
+      rows.forEach((r, ri) => {
+        if (/^[\s|:-]+$/.test(r)) return;  // separator row
+        const tag = ri === 0 ? 'th' : 'td';
+        html += '<tr>' + cells(r).map(c => `<${tag}>` + inline(c) + `</${tag}>`).join('') + '</tr>';
+      });
+      out.push(html + '</table>');
+      continue;
+    }
+    if (/^#{1,3} /.test(line)) {
+      flush();
+      const level = line.match(/^#+/)[0].length;
+      out.push(`<h${level}>` + inline(line.replace(/^#+ /, '')) + `</h${level}>`);
+    } else if (line.startsWith('> ')) {
+      flush();
+      out.push('<blockquote><p>' + inline(line.slice(2)) + '</p></blockquote>');
+    } else if (/^[-*] /.test(line)) {
+      flushPara();
+      list.push(line.slice(2));
+    } else if (/^---+\s*$/.test(line)) {
+      flush();
+      out.push('<hr>');
+    } else if (line.trim() === '') {
+      flush();
+    } else {
+      flushList();
+      para.push(line);
+    }
+    i++;
+  }
+  flush();
+  return out.join('\n');
+}
+
+function toggleSortDir() {
+  sortOrder = sortOrder === 'desc' ? 'asc' : 'desc';
+  document.getElementById('sortDirBtn').textContent = sortOrder === 'desc' ? '↓' : '↑';
+  currentPage = 0;
+  loadMemories();
+}
+
+// ── Stats Dashboard ──
+async function loadStats() {
+  try {
+    const r = await fetchGW('/stats');
+    const s = await r.json();
+    const dash = document.getElementById('dashboard');
+    dash.innerHTML = `
+      <div class="stat-card">
+        <div class="stat-val">${s.total}</div>
+        <div class="stat-label">total memories</div>
+        <div class="stat-sub">${s.vectors} vectors</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">${(s.avg_heat||0).toFixed(2)}</div>
+        <div class="stat-label">avg heat</div>
+        <div class="stat-sub">${s.hot_memories} hot / ${s.cold_memories} cold</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">${s.recent_7d}</div>
+        <div class="stat-label">last 7 days</div>
+        <div class="stat-sub">${s.superseded} superseded</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-val">${s.with_validity_window}</div>
+        <div class="stat-label">with time window</div>
+      </div>
+    `;
+    renderCharts(s);
+  } catch(e) { console.error('stats error', e); }
+}
+
+function renderCharts(stats) {
+  const el = document.getElementById('chartsRow');
+  const tiers = stats.tiers || {};
+  const tierData = [
+    { label: 'T1 core', val: tiers.tier_1||0, color: 'var(--t1)' },
+    { label: 'T2 habits', val: tiers.tier_2||0, color: 'var(--t2)' },
+    { label: 'T3 diary', val: tiers.tier_3||0, color: 'var(--t3)' },
+    { label: 'T4 misc', val: tiers.tier_4||0, color: 'var(--t4)' },
+  ];
+  const maxTier = Math.max(...tierData.map(t=>t.val), 1);
+
+  el.innerHTML = `
+    <div class="chart-card">
+      <h3>tier distribution</h3>
+      <div class="bar-chart">
+        ${tierData.map(t => `
+          <div class="bar-row">
+            <span class="bar-label">${t.label}</span>
+            <div class="bar-track">
+              <div class="bar-fill" style="width:${(t.val/maxTier*100)}%;background:${t.color}"></div>
+              <span class="bar-val">${t.val}</span>
+            </div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+    <div class="chart-card">
+      <h3>heat distribution</h3>
+      <div class="heat-spectrum" id="heatSpectrum"></div>
+      <div style="display:flex;justify-content:space-between;margin-top:4px">
+        <span style="font-size:.55rem;color:var(--text-muted)">cold 0.0</span>
+        <span style="font-size:.55rem;color:var(--text-muted)">hot 1.0</span>
+      </div>
+    </div>
+  `;
+  loadHeatSpectrum();
+}
+
+async function loadHeatSpectrum() {
+  try {
+    const r = await fetchGW('/memories?sort=heat&order=asc&limit=500');
+    const d = await r.json();
+    const buckets = new Array(20).fill(0);
+    (d.memories||[]).forEach(m => {
+      const h = Math.min(m.heat||0, 1);
+      const idx = Math.min(Math.floor(h * 20), 19);
+      buckets[idx]++;
+    });
+    const maxB = Math.max(...buckets, 1);
+    const el = document.getElementById('heatSpectrum');
+    if (!el) return;
+    el.innerHTML = buckets.map((b, i) => {
+      const pct = (b / maxB * 100);
+      const hue = i / 19;
+      const r = Math.round(85 + hue * 132);
+      const g = Math.round(80 + (1-hue) * 40);
+      const bl = Math.round(78 - hue * 30);
+      return `<div class="heat-bar" style="height:${Math.max(pct,4)}%;background:rgb(${r},${g},${bl})" title="${(i*5)}%-${(i+1)*5}%: ${b} memories"></div>`;
+    }).join('');
+  } catch(e) {}
+}
+
+// ── Memory List ──
+async function loadMemories() {
+  sort = document.getElementById('sortSelect').value;
+  const q = document.getElementById('searchInput').value.trim();
+  const tierF = document.getElementById('tierFilter').value;
+  const offset = currentPage * pageSize;
+
+  if (q) {
+    const [semRes, txtRes] = await Promise.all([
+      fetchGW('/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query:q,n:30,boost_heat:true})}).then(r=>r.json()).catch(()=>({results:[]})),
+      fetchGW(`/memories?sort=${sort}&order=${sortOrder}&limit=100&q=`+encodeURIComponent(q)).then(r=>r.json()).catch(()=>({memories:[]}))
+    ]);
+    const seen = new Set();
+    const merged = [];
+    for (const r of (semRes.results||[])) { r._semantic = true; r._distance = r.distance; seen.add(r.id); merged.push(r); }
+    for (const m of (txtRes.memories||[])) { if (!seen.has(m.id)) { seen.add(m.id); merged.push(m); } }
+    let filtered = merged;
+    if (tierF) filtered = merged.filter(m => String(m.tier||4) === tierF);
+    totalMems = filtered.length;
+    renderList(filtered.slice(offset, offset+pageSize));
+    renderPagination();
+  } else {
+    try {
+      let url = `/memories?sort=${sort}&order=${sortOrder}&limit=${pageSize}&offset=${offset}`;
+      if (tierF) url += `&tier=${tierF}`;
+      const r = await fetchGW(url);
+      const d = await r.json();
+      totalMems = d.total || d.memories.length;
+      renderList(d.memories);
+      renderPagination();
+    } catch(e) { document.getElementById('memList').innerHTML = '<div class="empty-state">failed to load</div>'; }
+  }
+}
+
+function renderList(memories) {
+  const el = document.getElementById('memList');
+  el.innerHTML = '';
+  if (!memories.length) { el.innerHTML = '<div class="empty-state">no memories found</div>'; return; }
+  memories.forEach(m => {
+    const card = document.createElement('div');
+    card.className = 'mem-card';
+    card.onclick = () => card.classList.toggle('expanded');
+    const tags = parseTags(m.tags);
+    const heat = Math.min(m.heat || 0, 1);
+    const tierClass = (m.tier||4) <= 2 ? ` t${m.tier}` : '';
+    card.innerHTML = `
+      <div class="mem-top">
+        <div class="mem-heat"><div class="mem-heat-bar" style="width:${heat*100}%"></div></div>
+        <span class="mem-heat-val">${(m.heat||0).toFixed(2)}</span>
+        ${m._semantic ? `<span class="score-badge">↑ ${m.score?.toFixed(3)||m._distance?.toFixed(3)||''}</span>` : ''}
+        ${m.bm25 ? `<span class="bm25-badge">bm25 ${m.bm25.toFixed(2)}</span>` : ''}
+        <span class="mem-tier${tierClass}">T${m.tier||4}</span>
+        <div class="mem-badges">
+          ${m.pinned ? '<span class="mem-badge pinned">pinned</span>' : ''}
+          ${m.resolved ? '<span class="mem-badge resolved">resolved</span>' : ''}
+        </div>
+        <span class="mem-date">${m.date || ''}</span>
+      </div>
+      <div class="mem-summary">${escHtml(m.summary || '')}</div>
+      ${tags.length ? '<div class="mem-tags">' + tags.map(t => `<span class="mem-tag">${escHtml(t)}</span>`).join('') + '</div>' : ''}
+      <div class="mem-detail">
+        <div class="mem-doc">${escHtml(m.document || '(no vector document)')}</div>
+        <div class="mem-meta-grid">
+          <div class="mem-meta-item"><label>id</label><span>${escHtml(m.id)}</span></div>
+          <div class="mem-meta-item"><label>emotion</label><span>${m.emotion||'neutral'}</span></div>
+          <div class="mem-meta-item"><label>intensity</label><span>${m.intensity||3}</span></div>
+          <div class="mem-meta-item"><label>polarity</label><span>${m.polarity||'neutral'}</span></div>
+          <div class="mem-meta-item"><label>energy</label><span>${m.energy||0}</span></div>
+          <div class="mem-meta-item"><label>importance</label><span>${(m.importance||0.5).toFixed(2)}</span></div>
+          <div class="mem-meta-item"><label>access count</label><span>${m.access_count||0}</span></div>
+          <div class="mem-meta-item"><label>created</label><span>${m.created_at||''}</span></div>
+          <div class="mem-meta-item"><label>updated</label><span>${m.updated_at||''}</span></div>
+        </div>
+        <div class="mem-actions">
+          <button class="mem-btn" onclick="event.stopPropagation();openEdit('${escAttr(m.id)}','${escAttr((m.summary||'').replace(/\n/g,'\\n'))}')">edit</button>
+          <button class="mem-btn" onclick="event.stopPropagation();showRecallLog('${escAttr(m.id)}',this)">recall log</button>
+          <button class="mem-btn" onclick="event.stopPropagation();togglePin('${escAttr(m.id)}',${m.pinned?0:1})">${m.pinned?'unpin':'pin'}</button>
+          <button class="mem-btn" onclick="event.stopPropagation();toggleResolved('${escAttr(m.id)}',${m.resolved?0:1})">${m.resolved?'unresolve':'resolve'}</button>
+          <button class="mem-btn" onclick="event.stopPropagation();cycleTier('${escAttr(m.id)}',${m.tier||4})">tier ${m.tier||4}</button>
+          <button class="mem-btn" onclick="event.stopPropagation();adjustHeat('${escAttr(m.id)}',0.1)">heat+</button>
+          <button class="mem-btn" onclick="event.stopPropagation();adjustHeat('${escAttr(m.id)}',-0.1)">heat-</button>
+          <button class="mem-btn danger" onclick="event.stopPropagation();deleteMem('${escAttr(m.id)}')">delete</button>
+        </div>
+      </div>
+    `;
+    el.appendChild(card);
+  });
+}
+
+// ── Auto memories tab ──
+async function loadInlineMemories() {
+  const el = document.getElementById('autoList');
+  try {
+    const q = document.getElementById('autoSearch').value.trim();
+    let url = '/memories?sort=date&order=desc&limit=50';
+    if (q) url += '&q=' + encodeURIComponent(q);
+    const r = await fetchGW(url);
+    const d = await r.json();
+    el.innerHTML = '';
+    (d.memories||[]).forEach(m => {
+      const card = document.createElement('div');
+      card.className = 'inline-card';
+      const body = m.summary || m.document || '';
+      card.innerHTML = `
+        <div class="inline-top">
+          <span class="inline-cat">${escHtml(m.category || m.chroma_metadata?.category || 'auto')}</span>
+          <span class="inline-date">${m.date || ''}</span>
+        </div>
+        <div class="inline-body">${escHtml(body)}</div>
+        <div class="inline-actions">
+          <button class="mem-btn" onclick="editInline('${escAttr(m.id)}',this)">edit</button>
+          <button class="mem-btn danger" onclick="deleteInline('${escAttr(m.id)}')">delete</button>
+        </div>
+      `;
+      el.appendChild(card);
+    });
+  } catch(e) { el.innerHTML = '<div class="empty-state">failed to load</div>'; }
+}
+
+async function editInline(id, btn) {
+  const card = btn.closest('.inline-card');
+  const bodyEl = card.querySelector('.inline-body');
+  const current = bodyEl.textContent;
+  const ta = document.createElement('textarea');
+  ta.className = 'search-box';
+  ta.style.cssText = 'width:100%;min-height:80px;resize:vertical;margin:8px 0;font-family:var(--font-serif);font-size:.88rem;line-height:1.6';
+  ta.value = current;
+  bodyEl.replaceWith(ta);
+  ta.focus();
+  btn.textContent = 'save';
+  btn.onclick = async () => {
+    const newContent = ta.value.trim();
+    if (!newContent) return;
+    await fetchGW('/update-inline',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,content:newContent})});
+    toast('updated');
+    loadInlineMemories();
+  };
+}
+
+async function deleteInline(id) {
+  if (!confirm('delete this auto-memory?')) return;
+  await fetchGW('/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+  toast('deleted');
+  loadInlineMemories();
+  loadStats();
+}
+
+// ── Edit Modal ──
+function openEdit(id, summary) {
+  editingId = id;
+  document.getElementById('editContent').value = summary.replace(/\\n/g, '\n');
+  document.getElementById('editTitle').textContent = 'edit ' + id.slice(0,8);
+  document.getElementById('editModal').classList.add('show');
+}
+function closeEditModal() {
+  document.getElementById('editModal').classList.remove('show');
+  editingId = null;
+}
+async function saveEdit() {
+  if (!editingId) return;
+  const content = document.getElementById('editContent').value.trim();
+  await fetchGW('/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:editingId,summary:content})});
+  await fetchGW('/update-inline',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:editingId,content:content})});
+  toast('saved');
+  closeEditModal();
+  loadMemories();
+}
+
+// ── Actions ──
+async function showRecallLog(id, btn) {
+  const card = btn.closest('.mem-card');
+  let logEl = card.querySelector('.recall-log');
+  if (logEl) { logEl.remove(); return; }
+  try {
+    const r = await fetchGW('/recall-log/' + encodeURIComponent(id));
+    const data = await r.json();
+    logEl = document.createElement('div');
+    logEl.className = 'recall-log';
+    logEl.style.cssText = 'margin-top:12px;padding-top:12px;border-top:1px solid var(--border)';
+    if (!data.logs || !data.logs.length) {
+      logEl.innerHTML = '<div style="font-size:.7rem;color:var(--text-muted);font-style:italic">no recall history yet</div>';
+    } else {
+      logEl.innerHTML = '<div style="font-size:.65rem;color:var(--accent);margin-bottom:6px;text-transform:uppercase;letter-spacing:.08em">recall history (' + data.logs.length + ')</div>' +
+        data.logs.map(l => `<div style="display:flex;gap:8px;align-items:baseline;margin-bottom:4px;font-size:.7rem">
+          <span style="color:var(--text-muted);min-width:120px;flex-shrink:0">${l.ts||''}</span>
+          <span style="color:var(--text)">${escHtml((l.query||'').slice(0,80))}</span>
+          <span style="color:var(--accent);margin-left:auto">${(l.score||0).toFixed(3)}</span>
+        </div>`).join('');
+    }
+    card.querySelector('.mem-detail').appendChild(logEl);
+  } catch(e) { console.error(e); }
+}
+
+async function togglePin(id, val) {
+  await fetchGW('/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,pinned:val})});
+  toast(val ? 'pinned' : 'unpinned'); loadMemories();
+}
+async function toggleResolved(id, val) {
+  await fetchGW('/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,resolved:val})});
+  toast(val ? 'resolved' : 'unresolved'); loadMemories();
+}
+async function cycleTier(id, current) {
+  const next = current <= 1 ? 4 : current - 1;
+  await fetchGW('/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,tier:next})});
+  toast('tier → ' + next); loadMemories();
+}
+async function adjustHeat(id, delta) {
+  const r = await fetchGW('/memory/' + id);
+  const m = await r.json();
+  const newHeat = Math.max(0, Math.min(1, (m.heat||0.5) + delta));
+  await fetchGW('/update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id,heat:Math.round(newHeat*1000)/1000})});
+  toast('heat → ' + newHeat.toFixed(2)); loadMemories();
+}
+async function deleteMem(id) {
+  if (!confirm('delete this memory?')) return;
+  await fetchGW('/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id})});
+  toast('deleted'); loadMemories(); loadStats();
+}
+
+function renderPagination() {
+  const el = document.getElementById('pagination');
+  const pages = Math.ceil(totalMems / pageSize);
+  if (pages <= 1) { el.innerHTML = ''; return; }
+  const pg = currentPage, tot = pages;
+  el.innerHTML = `
+    <button ${pg===0?'disabled':''} onclick="currentPage=0;loadMemories()">«</button>
+    <button ${pg===0?'disabled':''} onclick="currentPage--;loadMemories()">‹</button>
+    <span>${pg+1} / ${tot}</span>
+    <button ${pg>=tot-1?'disabled':''} onclick="currentPage++;loadMemories()">›</button>
+    <button ${pg>=tot-1?'disabled':''} onclick="currentPage=${tot}-1;loadMemories()">»</button>
+  `;
+}
+
+function parseTags(t) { if (!t) return []; try { return JSON.parse(t); } catch { return []; } }
+function escHtml(s) { if (!s) return ''; const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+function escAttr(s) { if (!s) return ''; return String(s).replace(/'/g,"\\'").replace(/"/g,'&quot;'); }
+function toast(msg) { const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2000); }
+
+
+
+// ── Models Tab ──
+let modelsData = {};
+const modelLabels = { embedding: 'embedding model', extraction: 'extraction model', compression: 'compression model' };
+const skipFields = new Set(['description']);
+
+async function loadModels() {
+  const el = document.getElementById('modelsGrid');
+  try {
+    const r = await fetchGW('/models');
+    modelsData = await r.json();
+    renderModels();
+  } catch(e) {
+    el.innerHTML = '<div class="empty-state">failed to load model info</div>';
+    console.error('models error', e);
+  }
+}
+
+function renderModels() {
+  const el = document.getElementById('modelsGrid');
+  el.innerHTML = '';
+  for (const [key, model] of Object.entries(modelsData)) {
+    const label = modelLabels[key] || key;
+    const prefix = key.slice(0, 3);
+    const fields = Object.entries(model).filter(([k]) => k !== 'description').map(([k, v]) => {
+      const isKey = k.toLowerCase().includes('apikey') || k.toLowerCase().includes('key');
+      const inputType = typeof v === 'number' ? 'number' : (isKey ? 'password' : 'text');
+      const toggle = isKey ? `<button class="model-key-toggle" onclick="event.preventDefault();const i=document.getElementById('${prefix}-${k}');i.type=i.type==='password'?'text':'password';this.textContent=i.type==='password'?'show':'hide'" style="position:absolute;right:8px;top:50%;transform:translateY(-50%);background:none;border:none;color:var(--text-muted);font-family:var(--font-mono);font-size:.6rem;cursor:pointer">show</button>` : '';
+      return `<div class="model-field" style="position:relative">
+        <label class="model-meta-key">${escHtml(k)}</label>
+        <input class="model-input" id="${prefix}-${k}" type="${inputType}" value="${escAttr(String(v || ''))}" style="${isKey ? 'padding-right:40px' : ''}" />
+        ${toggle}
+      </div>`;
+    }).join('');
+    const desc = model.description || '';
+    el.innerHTML += `
+      <div class="model-card">
+        <div class="model-label">${escHtml(label)}</div>
+        <div class="model-fields">
+          ${fields}
+          <div class="model-field">
+            <label class="model-meta-key">description</label>
+            <input class="model-input" id="${prefix}-description" value="${escAttr(desc)}" />
+          </div>
+        </div>
+        <div class="model-actions">
+          <button class="mem-btn" onclick="saveModel('${escAttr(key)}')">save</button>
+        </div>
+      </div>
+    `;
+  }
+}
+
+async function saveModel(key) {
+  const model = modelsData[key];
+  if (!model) return;
+  const prefix = key.slice(0, 3);
+  const updated = {};
+  for (const k of Object.keys(model)) {
+    const input = document.getElementById(prefix + '-' + k);
+    if (!input) { updated[k] = model[k]; continue; }
+    updated[k] = typeof model[k] === 'number' ? (parseInt(input.value) || 0) : input.value;
+  }
+  try {
+    const payload = {};
+    payload[key] = updated;
+    await fetchGW('/models', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload)
+    });
+    modelsData[key] = updated;
+    toast('saved');
+  } catch(e) {
+    toast('save failed');
+    console.error(e);
+  }
+}
+
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme');
+  const next = current === 'light' ? 'dark' : 'light';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('mem-theme', next);
+  document.getElementById('themeBtn').textContent = next === 'light' ? '🌙' : '☀';
+}
+(function() {
+  const saved = localStorage.getItem('mem-theme') || 'dark';
+  document.documentElement.setAttribute('data-theme', saved);
+  document.getElementById('themeBtn').textContent = saved === 'light' ? '🌙' : '☀';
+})();
+
+document.getElementById('sortDirBtn').textContent = '↓';
+loadStats();
+loadMemories();
+</script>
+</body>
+</html>

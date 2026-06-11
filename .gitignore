@@ -1,0 +1,31 @@
+# Runtime data & secrets — never commit
+data/
+memory/
+*.db
+*.db-wal
+*.db-shm
+settings.json
+vault.json
+
+# Backups / attic
+*.bak
+*.bak.*
+attic/
+*.pre-*
+
+# Python
+__pycache__/
+*.pyc
+chroma/
+chroma_db/
+vectors/
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
