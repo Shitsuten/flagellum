@@ -16,15 +16,18 @@ export async function getMcpTools() {
   for (const rawUrl of urls) {
     const url = rawUrl.trim();
     try {
+      // 握手发生在响应头写出之前 —— 一个挂死的 MCP 服务会把整个 /chat
+      // 堵在 writeHead 前面,必须有超时
       const initRes = await fetch(url, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'flagellum', version: '1.0' } } })
+        body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'flagellum', version: '1.0' } } }),
+        signal: AbortSignal.timeout(8000)
       });
       if (!initRes.ok || !(initRes.headers.get('content-type') || '').includes('application/json')) continue;
 
-      await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} }) });
+      await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', method: 'notifications/initialized', params: {} }), signal: AbortSignal.timeout(8000) });
 
-      const toolsRes = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }) });
+      const toolsRes = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }), signal: AbortSignal.timeout(8000) });
       const toolsData = await toolsRes.json();
       for (const t of (toolsData.result?.tools || [])) {
         tools.push({ name: t.name, description: t.description || '', input_schema: t.inputSchema || { type: 'object', properties: {} }, _url: url });
@@ -42,7 +45,8 @@ export async function callMcpTool(name, input, tools) {
   try {
     const res = await fetch(tool._url, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method: 'tools/call', params: { name, arguments: input } })
+      body: JSON.stringify({ jsonrpc: '2.0', id: Date.now(), method: 'tools/call', params: { name, arguments: input } }),
+      signal: AbortSignal.timeout(60000)  // 和 exec 的 60s 上限对齐
     });
     const data = await res.json();
     if (data.error) return 'Error: ' + (data.error.message || JSON.stringify(data.error));

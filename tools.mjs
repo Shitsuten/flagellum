@@ -55,15 +55,19 @@ export async function callBuiltinTool(name, input) {
     if (input?.exact) {
       const r = await fetch(MEMORY_URL + '/raw-search', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: q, n: 6 })
+        body: JSON.stringify({ query: q, n: 6 }),
+        signal: AbortSignal.timeout(10000)
       });
       const d = await r.json();
       if (!d.results?.length) return '原文检索无结果。提示:逐字匹配整个短语、至少3个字;可换更短的词组,或去掉exact用语义检索。';
       return d.results.map(x => `[${x.date || '?'} ${x.source || ''} ${x.role || ''}] ${x.content}`).join('\n---\n');
     }
+    // 超时降级:记忆服务忙的时候(单线程实现/批量导入)别让一次 recall
+    // 拖死整个 tool loop —— catch 里会变成一条报错字符串还给模型
     const r = await fetch(MEMORY_URL + '/search', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: q, n: 5 })
+      body: JSON.stringify({ query: q, n: 5 }),
+      signal: AbortSignal.timeout(10000)
     });
     const d = await r.json();
     if (!d.results?.length) return '没有找到相关记忆';

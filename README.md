@@ -75,7 +75,27 @@ curl -N http://127.0.0.1:3800/chat \
   -d '{"messages":[{"role":"user","content":"看一下这台机器的磁盘还剩多少"}]}'
 ```
 
-响应是 Anthropic 格式的 SSE 流,外加一种自定义事件 `gateway_tool_result`(工具执行结果,方便客户端实时渲染;按标准格式解析的客户端会自动忽略它)。
+响应是 Anthropic 格式的 SSE 流,外加一种自定义事件 `gateway_tool_result`(工具执行结果,方便客户端实时渲染;按标准格式解析的客户端会自动忽略它)。流空闲超过 14 秒时会发 `: ping` 注释帧保活,SSE parser 会自动忽略。
+
+## 放在反向代理后面
+
+这一节是用一个真实的 504 换来的。
+
+工具执行期间(exec 最长能跑 60 秒)SSE 流上**一个字节都没有**,而 nginx 的 `proxy_read_timeout` 默认正好也是 60 秒,Cloudflare 的空闲超时约 100 秒——一条慢命令就能让代理在网关还在干活的时候把连接掐掉,客户端看到 504,网关这边毫无知觉。
+
+网关侧的根治是上面说的空闲保活 ping(任何长度的工具执行,静默都不会超过 ~19 秒)。代理侧配合两件事:
+
+```nginx
+location /chat {
+    proxy_pass http://127.0.0.1:3800;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_buffering off;            # SSE 必须关 buffering,否则 ping 也救不了
+    proxy_read_timeout 600s;        # tool loop 可以合法地跑几分钟
+}
+```
+
+另外所有出网关的 fetch(recall 的记忆服务、MCP 握手)都带 `AbortSignal.timeout`:MCP 握手发生在响应头写出之前,一个挂死的依赖服务会把整个请求堵在 `writeHead` 前面——那是 ping 都救不了的死法,只能靠超时降级。
 
 ## ⚠️ 安全
 
