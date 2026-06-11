@@ -1,111 +1,86 @@
 # hearth
 
-A self-hosted streaming chat gateway for Anthropic / OpenAI-compatible LLMs, built around three ideas that most thin API wrappers skip:
+一个最小的流式 tool loop,演示一件事:**内置工具(built-in tools)**。
 
-1. **Prompt-cache-aware prompt layout** — the system/history is arranged into stable cache breakpoints so that across a back-and-forth chat, you mostly pay *cache reads* (0.1×) instead of re-billing the whole prefix every turn.
-2. **Tiered memory with index-then-recall** — long-term memory is injected as a one-line-per-entry *index*, and the model pulls full text on demand via a built-in tool. Cheap by default, precise when it matters.
-3. **Built-in agent tools without MCP** — when the gateway and the tools live on the same box you own, the model gets `exec` (shell) and `recall` (memory) executed in-process. MCP is for reaching tools you *don't* own; your own services don't need the socket.
+当网关和工具住在同一台你自己的机器上、服务的是同一个人时,模型调 `exec`(跑 shell 命令)和 `recall`(查长期记忆)可以直接在网关进程内执行——不需要 MCP,不需要协议往返,不需要再开一个服务。MCP 是用来够到**不属于你的**工具的;自己机器上的东西,不用绕那个圈。
 
-It's the runtime behind a personal assistant. The persona/relationship content has been stripped — what's left is the plumbing.
+这是从一个长期运行的个人助手部署里抽出来的,人格和关系内容都剥掉了,剩下的就是这一层管道。对话持久化、prompt 缓存断点布局、分层记忆系统不在这个仓库里——那些见 [paramecium](https://github.com/Shitsuten/paramecium)。
 
-> ⚠️ **Security**: the `exec` tool runs arbitrary shell commands as the gateway process. This gateway is meant to sit on a private host behind authentication, serving a single trusted user. Do **not** expose it publicly or to untrusted callers.
-
-## Architecture at a glance
+## 它怎么工作
 
 ```
-  client ──▶  server.mjs (HTTP routes, conversation storage)
-                  │
-                  ▼
-              gateway.mjs ── assembles the cached prompt, streams the
-                  │          provider response, runs the tool loop,
-                  │          auto-compresses context
-                  ▼
-          memory-gateway.py (:3900) ── vector (ChromaDB) + BM25 (jieba)
-                                        + SQLite metadata + FTS5 raw archive
+客户端 ── POST /chat ──> server.mjs(无状态)
+                            │
+                        gateway.mjs
+                            │
+              ┌── 流式请求 Anthropic API,SSE 原样透传给客户端,
+              │   同时在本端攒出完整的 content blocks
+              │
+              └── stop_reason == "tool_use" 时:
+                    ├── exec / recall  → 进程内直接执行(tools.mjs)
+                    ├── 其他名字       → fall through 到 MCP(mcp.mjs)
+                    └── 结果塞回对话,发起下一轮,直到模型正常收尾
 ```
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design: the breakpoint layout, the three-factor ranking formula, the recall flow, and the cost model.
+四个文件,各管一段:
 
-## The cache layout
+| 文件 | 职责 |
+|------|------|
+| `tools.mjs` | 两个内置工具的定义和执行 |
+| `mcp.mjs` | 最小 MCP 客户端,只做 fall-through |
+| `gateway.mjs` | 流式透传 + tool loop |
+| `server.mjs` | 无状态 demo 服务器 |
 
-The prompt is split so that everything volatile sits *after* the last cache breakpoint:
+## 内置工具
+
+**`exec`** — 在网关所在的主机上跑 shell 命令。60 秒超时,输出超过 8000 字符截断,工作目录由 `EXEC_CWD` 指定。
+
+**`recall`** — 查长期记忆。语义检索是默认模式;`exact=true` 走逐字全文检索(FTS),适合找原话。它代理到一个本地记忆服务(`MEMORY_URL`,默认 `127.0.0.1:3900`),接口约定:
 
 ```
-[tools]                              ← stable, leads the prefix
-[BP1] persona + profiles   cache 1h  ← changes ~never
-[BP2] recent context       cache 1h  ← changes ~daily (day-anchored)
-[BP3] session summary      cache 1h  ← changes per compression cycle
-[...history...]
-[BP4] rolling breakpoint   cache 1h  ← on the last history message
-[current message + volatile]         ← never cached, re-billed every turn
+POST /search       { query, n }  →  { results: [{ document, metadata: { date, category } }] }
+POST /raw-search   { query, n }  →  { results: [{ content, date, source, role }] }
 ```
 
-A small heartbeat keeps the prefix warm within the cache TTL while the user is active.
+记忆服务本体不在这个仓库——任何实现了这两个端点的服务都能接上,参考实现见 paramecium。没有记忆服务时 recall 会优雅地报错,不影响 exec 和正常对话。
 
-## The three memory tiers
+## 为什么不全走 MCP
 
-| Tier | Store | What | How it's used |
-|------|-------|------|---------------|
-| L0 raw | `raw-archive.db` (FTS5) | verbatim text | exact-quote recall (`recall` with `exact=true`) |
-| L1 distilled | ChromaDB + SQLite | extracted memory entries | injected as a title-only index; full text via `recall` |
-| L2 profile | markdown files | stable facts about the user | injected into BP1 every turn |
+1. **没有协议往返。** MCP 每次调用是 initialize → tools/list → tools/call 三段 JSON-RPC;内置工具就是一次函数调用。
+2. **工具定义字节级稳定。** 工具定义排在 prompt 缓存前缀的最前面,内置工具的定义写死在代码里、顺序固定,永远不会因为某个 MCP 服务抖动而打破整条缓存前缀。
+3. **两者共存,不用二选一。** 模型调了内置工具不认识的名字,自动 fall through 到 MCP。远程服务照常接 MCP,本机的事情进程内做。
 
-Ranking for L1 is semantic × recency × access, gated by a validity window — see the architecture doc.
+## 运行
 
-## Built-in tools
-
-- **`recall`** — searches memory (semantic or verbatim FTS) and returns full entries.
-- **`exec`** — runs a shell command on the host. In-process, no MCP round trip.
-
-External tools (things you don't own) can still be attached over MCP via the `mcpServers` setting.
-
-## Running it
-
-These services expect a few paths via environment variables (defaults are repo-relative so it boots out of the box for inspection):
+需要 Node 18+,没有任何 npm 依赖。
 
 ```bash
-# chat gateway + storage (Node 18+)
-GATEWAY_DATA=./data \
-VAULT_JSON=./data/vault.json \
-GATEWAY_USER_ID=default-user \
+ANTHROPIC_API_KEY=sk-ant-... \
 EXEC_CWD=/home/youruser \
-node server.mjs                  # listens on :3800
-
-# memory gateway (Python 3.10+)
-pip install chromadb jieba fastembed
-MEMORY_DIR=./memory \
-VAULT_JSON=./data/vault.json \
-python3 memory-gateway.py        # listens on :3900
+node server.mjs
 ```
 
-| Variable | Used by | Default | What |
-|----------|---------|---------|------|
-| `GATEWAY_DATA` | server, gateway | `./data` | conversation JSON + settings storage |
-| `VAULT_JSON` | gateway, memory-gw | `./data/vault.json` | external vault file (optional) |
-| `GATEWAY_USER_ID` | gateway | `default-user` | Anthropic `metadata.user_id` for abuse tracking |
-| `EXEC_CWD` | gateway | `process.cwd()` | working directory for the `exec` tool |
-| `MEMORY_DIR` | server, memory-gw | `./memory` | SQLite, vectors, profiles, facts |
+监听 `127.0.0.1:3800`。可选环境变量:
 
-Provider keys, model, and MCP servers are configured at runtime through `PUT /settings` (or the web UI's settings panel) and stored in `${GATEWAY_DATA}/settings.json` — **not** committed.
+- `MEMORY_URL` — recall 代理的记忆服务地址,默认 `http://127.0.0.1:3900`
+- `MCP_SERVERS` — 每行一个 streamable-http 端点 URL,留空则只有内置工具
+- `ANTHROPIC_BASE_URL` — 换 API 端点(代理等),默认官方 `/v1/messages`
+- `PORT` — 默认 3800
 
-The `web/` directory is a static single-page client (vanilla JS, no build step). Serve it behind the same origin as the gateway API. The frontend assumes it's mounted at `/raffaello/chat/` with the API at `/raffaello/chat/api/` — to change this, update `CHAT_API` in `web/state.js` and the corresponding paths in `web/push.js` and `web/memory.js`.
+试一下:
 
-## Layout
-
-```
-gateway.mjs          core: prompt assembly, cache layout, streaming proxy,
-                     tool loop, cycle compression, built-in tools
-server.mjs           HTTP routes: conversations, settings, memory proxy
-memory-gateway.py    :3900 memory service (vector + BM25 + FTS + SQLite)
-embedding.py         BGE-small-zh embedding function (used by memory-gateway)
-web/                 static SPA client
-docs/ARCHITECTURE.md full design notes
+```bash
+curl -N http://127.0.0.1:3800/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"看一下这台机器的磁盘还剩多少"}]}'
 ```
 
-## Status
+响应是 Anthropic 格式的 SSE 流,外加一种自定义事件 `gateway_tool_result`(工具执行结果,方便客户端实时渲染;按标准格式解析的客户端会自动忽略它)。
 
-Extracted from a running personal deployment. It works, but it's opinionated and assumes a single trusted user. Treat it as a reference design and a starting point, not a turnkey product.
+## ⚠️ 安全
+
+`exec` 就是任意命令执行,以网关进程的身份跑。这个东西的设计前提是:**私有主机、有认证、单个受信任的用户**。绝对不要把它裸露在公网上,也不要给不受信任的调用方。服务器默认只绑 `127.0.0.1`。
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT
