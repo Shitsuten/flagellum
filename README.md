@@ -68,16 +68,27 @@ These services expect a few paths via environment variables (defaults are repo-r
 GATEWAY_DATA=./data \
 VAULT_JSON=./data/vault.json \
 GATEWAY_USER_ID=default-user \
+EXEC_CWD=/home/youruser \
 node server.mjs                  # listens on :3800
 
-# memory gateway (Python 3.10+, needs chromadb jieba)
+# memory gateway (Python 3.10+)
+pip install chromadb jieba fastembed
 MEMORY_DIR=./memory \
+VAULT_JSON=./data/vault.json \
 python3 memory-gateway.py        # listens on :3900
 ```
 
+| Variable | Used by | Default | What |
+|----------|---------|---------|------|
+| `GATEWAY_DATA` | server, gateway | `./data` | conversation JSON + settings storage |
+| `VAULT_JSON` | gateway, memory-gw | `./data/vault.json` | external vault file (optional) |
+| `GATEWAY_USER_ID` | gateway | `default-user` | Anthropic `metadata.user_id` for abuse tracking |
+| `EXEC_CWD` | gateway | `process.cwd()` | working directory for the `exec` tool |
+| `MEMORY_DIR` | server, memory-gw | `./memory` | SQLite, vectors, profiles, facts |
+
 Provider keys, model, and MCP servers are configured at runtime through `PUT /settings` (or the web UI's settings panel) and stored in `${GATEWAY_DATA}/settings.json` — **not** committed.
 
-The `web/` directory is a static single-page client (vanilla JS, no build step). Serve it behind the same origin as the gateway API.
+The `web/` directory is a static single-page client (vanilla JS, no build step). Serve it behind the same origin as the gateway API. The frontend assumes it's mounted at `/raffaello/chat/` with the API at `/raffaello/chat/api/` — to change this, update `CHAT_API` in `web/state.js` and the corresponding paths in `web/push.js` and `web/memory.js`.
 
 ## Layout
 
@@ -86,6 +97,7 @@ gateway.mjs          core: prompt assembly, cache layout, streaming proxy,
                      tool loop, cycle compression, built-in tools
 server.mjs           HTTP routes: conversations, settings, memory proxy
 memory-gateway.py    :3900 memory service (vector + BM25 + FTS + SQLite)
+embedding.py         BGE-small-zh embedding function (used by memory-gateway)
 web/                 static SPA client
 docs/ARCHITECTURE.md full design notes
 ```

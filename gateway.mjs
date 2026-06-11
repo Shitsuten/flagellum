@@ -702,7 +702,7 @@ const BUILTIN_TOOLS = [{
   input_schema: {
     type: 'object',
     properties: {
-      command: { type: 'string', description: 'shell命令' }
+      command: { type: 'string', description: 'shell command' }
     },
     required: ['command']
   }
