@@ -1,5 +1,5 @@
 // ============================================================
-//  hearth — 流式 tool loop
+//  flagellum — 流式 tool loop
 //
 //  把 Anthropic 的 SSE 流原样转发给客户端,同时在本端攒出完整的
 //  content blocks。模型停在 tool_use 时:内置工具(exec/recall)

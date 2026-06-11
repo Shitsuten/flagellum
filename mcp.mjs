@@ -18,7 +18,7 @@ export async function getMcpTools() {
     try {
       const initRes = await fetch(url, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'hearth', version: '1.0' } } })
+        body: JSON.stringify({ jsonrpc: '2.0', id: 0, method: 'initialize', params: { protocolVersion: '2024-11-05', capabilities: {}, clientInfo: { name: 'flagellum', version: '1.0' } } })
       });
       if (!initRes.ok || !(initRes.headers.get('content-type') || '').includes('application/json')) continue;
 

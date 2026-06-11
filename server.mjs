@@ -29,5 +29,5 @@ http.createServer((req, res) => {
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end('{"error":"not found"}');
 }).listen(PORT, '127.0.0.1', () => {
-  console.log(`hearth listening on 127.0.0.1:${PORT}`);
+  console.log(`flagellum listening on 127.0.0.1:${PORT}`);
 });

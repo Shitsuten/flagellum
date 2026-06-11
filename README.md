@@ -1,4 +1,4 @@
-# hearth
+# flagellum
 
 一个最小的流式 tool loop,演示一件事:**内置工具(built-in tools)**。
 
