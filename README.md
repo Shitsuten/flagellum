@@ -1,10 +1,5 @@
 # flagellum
 
-紧急避险！！用中转站api搞这个有很大风险，不建议使用TT
-正在加固安全措施中，如果有更安全的方法会更新…
-
---
-
 一个最小的流式 tool loop,演示一件事:**内置工具(built-in tools)**。
 
 当网关和工具住在同一台你自己的机器上、服务的是同一个人时,模型调 `exec`(跑 shell 命令)和 `recall`(查长期记忆)可以直接在网关进程内执行——不需要 MCP,不需要协议往返,不需要再开一个服务。MCP 是用来够到**不属于你的**工具的;自己机器上的东西,不用绕那个圈。
@@ -128,7 +123,61 @@ location /chat {
 
 ## ⚠️ 安全
 
-`exec` 就是任意命令执行,以网关进程的身份跑。这个东西的设计前提是:**私有主机、有认证、单个受信任的用户**。绝对不要把它裸露在公网上,也不要给不受信任的调用方。服务器默认只绑 `127.0.0.1`。
+`exec` 就是任意命令执行。我们自己用中转站时踩过坑——exec 的命令和输出**经过中转站明文可见**,SSH 配置、文件列表、服务器拓扑全暴露了。以下是踩完坑后的安全分级:
+
+### 最安全:不用 exec
+
+把常用操作拆成独立工具(类似 MCP,但可以是进程内的):
+
+```js
+// 替代 exec curl 127.0.0.1:3300/health
+{ name: 'health_check', handler: () => fetch('http://127.0.0.1:3300/health').then(r => r.text()) }
+// 替代 exec pm2 restart marginalia  
+{ name: 'service_restart', handler: ({service}) => execShell('pm2 restart ' + service, ...) }
+```
+
+模型调用的是结构化工具,中转站看到的只是 `health_check()`,看不到端口号和命令行。服务多了会占 tool definition token,权衡取舍。
+
+### 次安全:用 exec 但降权
+
+如果需要保留 exec 的灵活性,**必须降权到独立用户**:
+
+```bash
+# 创建沙箱用户
+useradd -r -s /bin/bash -m execuser
+# ubuntu 可以免密切换到 execuser
+echo "ubuntu ALL=(execuser) NOPASSWD: ALL" > /etc/sudoers.d/execuser
+# 锁住敏感文件
+chmod 600 ~/.ssh/* models.json .env
+chmod 750 ~
+```
+
+然后设环境变量 `EXEC_USER=execuser`,tools.mjs 会自动用 `sudo -u execuser` 跑所有命令。execuser 读不了你的 SSH 密钥、API key、网关源码——Linux 文件权限硬挡,不靠正则。
+
+### 兜底:输出脱敏(不管哪种方案都要加)
+
+即便拆成了独立工具,服务返回的内容本身可能含敏感信息(比如日志里打了 IP,记忆库里存了配置)。`sanitizeOutput()` 在 tools.mjs 里自动洗:
+
+- IP 地址 → `[IP]`
+- 家目录路径 → `/home/[USER]`
+- SSH 配置 → `[REDACTED]`  
+- API key 模式 (sk-/wrk-/token-) → `[KEY]`
+- 环境变量赋值 → `[ENV_VAR]`
+
+这层正则是最后一道防线——权限没锁住的文件,脱敏接着拦。
+
+### 跨服务器 SSH
+
+如果需要 exec 连到另一台机器(比如修远程服务),**不要复用主用户的 SSH 密钥**:
+
+1. 给 execuser 单独生成密钥: `sudo -u execuser ssh-keygen`
+2. 远程机器创建低权限维修工用户: `useradd mechanic`
+3. mechanic 只能查日志/重启服务,不能读配置
+4. 公钥加到 mechanic 的 authorized_keys
+
+三层降权:中转站 → execuser(沙箱) → mechanic(维修工)。
+
+服务器默认只绑 `127.0.0.1`。
 
 ## License
 

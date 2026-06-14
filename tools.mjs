@@ -34,17 +34,62 @@ export const BUILTIN_TOOLS = [{
 }];
 
 // 返回工具结果字符串;名字不认识时返回 null,由调用方 fall through 到 MCP
+// ============================================================
+//  exec 安全层 (2026-06-14)
+//
+//  如果你用的是中转站(非直连 Anthropic),exec 的命令和输出都经过
+//  第三方明文可见。以下措施分三层:
+//
+//  1. 用户隔离 — EXEC_USER 指定一个低权限沙箱用户,跑 sudo -u
+//     这个用户读不了你的 ~/.ssh/、密钥、网关源码
+//  2. 命令黑名单 — 拦截 rm -r、dd、shutdown 等破坏性命令
+//  3. 输出脱敏 — IP/路径/密钥/SSH配置自动替换
+//
+//  最安全的做法是不用 exec,把服务拆成独立 MCP 工具。
+//  次安全是用 exec + 以下三层防护。
+//  不管哪种,网关层都应该加输出脱敏正则兜底。
+// ============================================================
+
+const EXEC_USER = process.env.EXEC_USER || '';  // 空 = 不降权(危险),建议设为沙箱用户名
+
+const BLOCKED_CMD = /^\s*(rm\s+-r|dd\s+if=|mkfs|shutdown|reboot|passwd|chmod\s+777|iptables\s+-[FXD]|>\s*\/etc)/i;
+const SSH_DANGER = /ssh\s+\S+\s+.*(rm\s+-r|dd\s+if|mkfs|shutdown|reboot|passwd|chmod\s+777|iptables\s+-[FXD]|>\s*\/etc)/i;
+const SELF_PROTECT = /gateway\.mjs|server\.mjs|tools\.mjs|sanitize|callBuiltin/i;
+const WRITE_CMD = /(sed|vim?|nano|echo.*>|tee|cp|mv|rm|cat.*>|truncate|dd)/i;
+
+function sanitizeOutput(text) {
+  return text
+    .replace(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g, '[IP]')
+    .replace(/\/home\/\w+/g, '/home/[USER]')
+    .replace(/\/root/g, '/[ROOT]')
+    .replace(/.ssh\/[^\s]+/g, '.ssh/[REDACTED]')
+    .replace(/\b(sk|wrk|key|token|secret|password|passwd)[-_][A-Za-z0-9_-]{8,}\b/gi, '[KEY]')
+    .replace(/[A-Z_]{3,}=["']?[^\s"']{8,}["']?/g, '[ENV_VAR]')
+    .replace(/HostName\s+\S+/g, 'HostName [REDACTED]')
+    .replace(/User\s+\w+/g, 'User [REDACTED]')
+    .replace(/IdentityFile\s+\S+/g, 'IdentityFile [REDACTED]');
+}
+
 export async function callBuiltinTool(name, input) {
   if (name === 'exec') {
     const cmd = (input?.command || '').trim();
     if (!cmd) return '(empty command)';
+    if (BLOCKED_CMD.test(cmd) || SSH_DANGER.test(cmd)) {
+      console.warn('[exec-guard] BLOCKED:', cmd.slice(0, 200));
+      return '[blocked] 危险命令被拦截。';
+    }
+    if (SELF_PROTECT.test(cmd) && WRITE_CMD.test(cmd)) {
+      console.warn('[exec-guard] SELF-PROTECT:', cmd.slice(0, 200));
+      return '[blocked] 不允许修改网关核心文件。';
+    }
+    const prefix = EXEC_USER ? `sudo -u ${EXEC_USER} ` : '';
     return new Promise(resolve => {
-      execShell(cmd, { timeout: 60000, maxBuffer: 1024 * 1024, cwd: process.env.EXEC_CWD || process.cwd() }, (err, stdout, stderr) => {
+      execShell(prefix + cmd, { timeout: 60000, maxBuffer: 1024 * 1024, cwd: process.env.EXEC_CWD || '/tmp' }, (err, stdout, stderr) => {
         let out = (stdout || '') + (stderr ? '\n[stderr] ' + stderr : '');
         if (err && !out) out = 'error: ' + err.message;
         else if (err?.killed) out += '\n[killed: 60s timeout]';
         if (out.length > 8000) out = out.slice(0, 8000) + '\n…(truncated)';
-        resolve(out.trim() || '(no output)');
+        resolve(sanitizeOutput(out.trim() || '(no output)'));
       });
     });
   }
