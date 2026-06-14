@@ -133,23 +133,17 @@ POST /raw-search   { query, n }  →  { results: [{ content, date, source, role 
 
 试过的选项和结论:
 
-- **工具 description 里** ✗ — 工具定义是 prompt 缓存前缀的字节级稳定开头,不该混进会变的数据
 - **长期记忆里** ✗ — 基础设施事实不是记忆,语义检索对"3300是谁"这种查表问题不可靠
 - **机器上放一个 SERVICE.md 靠 exec 去 grep** △ — 可以,但常用查询每次多一轮往返
-- **system prompt 的稳定缓存段里放一个紧凑表** ✓ — 十几个服务一行一个,两三百 token,挂在带 `cache_control` 的前缀块里几乎免费,模型张口就知道
+- **system prompt 里放一个紧凑表** △ — 可以但有安全代价:端口和服务拓扑每条消息都经过中转站明文可见,等于把地图广播给所有中间人
+- **exec 的 tool description 里** ✓ — 端口表写在 exec 工具的 description 字段里,模型调 exec 前就知道能干什么,且只在模型真正需要调工具时才出现在请求里。示例见 `tools.mjs` 里 exec 的 description
 
-```
-<server_map>
-本机服务,直接 curl 127.0.0.1:端口
-3800 chat-api — 你自己所在的网关
-3900 mem-search — 记忆引擎(/inject /search)
-3500 whisper — 语音+推送
-…
-端点详情/认证方式: grep /opt/SERVICE.md
-</server_map>
+```js
+// tools.mjs 里的 exec description 示例
+description: '在VPS上执行shell命令(沙箱execuser)。可用服务: 3300 marginalia | 3600 heartbeat | 3900 mem-search | ...'
 ```
 
-经验法则:**prompt 块管"哪个端口"这类高频小事实,机器上的详情文档管长尾**——表的最后一行给模型指路,需要 nginx 路由、token 这种细节时它自己会去 grep。实测效果:同一个问题,改造前是一轮 grep 加一次工具往返,改造后零工具调用直接报答案。
+之前我们的做法是放在 system prompt 的缓存段里(token 几乎免费),后来出于安全考虑(减少中转站看到的拓扑信息)迁移到了 tool description。如果你不经过中转站(直连官方 API),放 system prompt 里仍然是最省事的选择。
 
 ## 运行
 
