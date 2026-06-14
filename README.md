@@ -6,6 +6,64 @@
 
 这是从一个长期运行的个人助手部署里抽出来的,人格和关系内容都剥掉了,剩下的就是这一层管道。对话持久化、prompt 缓存断点布局、分层记忆系统不在这个仓库里——那些见 [paramecium](https://github.com/Shitsuten/paramecium)。
 
+## ⚠️ 安全
+
+`exec` 就是任意命令执行。我们自己用中转站时踩过坑——exec 的命令和输出**经过中转站明文可见**,SSH 配置、文件列表、服务器拓扑全暴露了。以下是踩完坑后的安全分级:
+
+### 最安全:不用 exec
+
+把常用操作拆成独立工具(类似 MCP,但可以是进程内的):
+
+```js
+// 替代 exec curl 127.0.0.1:3300/health
+{ name: 'health_check', handler: () => fetch('http://127.0.0.1:3300/health').then(r => r.text()) }
+// 替代 exec pm2 restart marginalia  
+{ name: 'service_restart', handler: ({service}) => execShell('pm2 restart ' + service, ...) }
+```
+
+模型调用的是结构化工具,中转站看到的只是 `health_check()`,看不到端口号和命令行。服务多了会占 tool definition token,权衡取舍。
+
+### 次安全:用 exec 但降权
+
+如果需要保留 exec 的灵活性,**必须降权到独立用户**:
+
+```bash
+# 创建沙箱用户
+useradd -r -s /bin/bash -m execuser
+# ubuntu 可以免密切换到 execuser
+echo "ubuntu ALL=(execuser) NOPASSWD: ALL" > /etc/sudoers.d/execuser
+# 锁住敏感文件
+chmod 600 ~/.ssh/* models.json .env
+chmod 750 ~
+```
+
+然后设环境变量 `EXEC_USER=execuser`,tools.mjs 会自动用 `sudo -u execuser` 跑所有命令。execuser 读不了你的 SSH 密钥、API key、网关源码——Linux 文件权限硬挡,不靠正则。
+
+### 兜底:输出脱敏(不管哪种方案都要加)
+
+即便拆成了独立工具,服务返回的内容本身可能含敏感信息(比如日志里打了 IP,记忆库里存了配置)。`sanitizeOutput()` 在 tools.mjs 里自动洗:
+
+- IP 地址 → `[IP]`
+- 家目录路径 → `/home/[USER]`
+- SSH 配置 → `[REDACTED]`  
+- API key 模式 (sk-/wrk-/token-) → `[KEY]`
+- 环境变量赋值 → `[ENV_VAR]`
+
+这层正则是最后一道防线——权限没锁住的文件,脱敏接着拦。
+
+### 跨服务器 SSH
+
+如果需要 exec 连到另一台机器(比如修远程服务),**不要复用主用户的 SSH 密钥**:
+
+1. 给 execuser 单独生成密钥: `sudo -u execuser ssh-keygen`
+2. 远程机器创建低权限维修工用户: `useradd mechanic`
+3. mechanic 只能查日志/重启服务,不能读配置
+4. 公钥加到 mechanic 的 authorized_keys
+
+三层降权:中转站 → execuser(沙箱) → mechanic(维修工)。
+
+服务器默认只绑 `127.0.0.1`。
+
 ## 它怎么工作
 
 ```
@@ -120,64 +178,6 @@ location /chat {
 ```
 
 另外所有出网关的 fetch(recall 的记忆服务、MCP 握手)都带 `AbortSignal.timeout`:MCP 握手发生在响应头写出之前,一个挂死的依赖服务会把整个请求堵在 `writeHead` 前面——那是 ping 都救不了的死法,只能靠超时降级。
-
-## ⚠️ 安全
-
-`exec` 就是任意命令执行。我们自己用中转站时踩过坑——exec 的命令和输出**经过中转站明文可见**,SSH 配置、文件列表、服务器拓扑全暴露了。以下是踩完坑后的安全分级:
-
-### 最安全:不用 exec
-
-把常用操作拆成独立工具(类似 MCP,但可以是进程内的):
-
-```js
-// 替代 exec curl 127.0.0.1:3300/health
-{ name: 'health_check', handler: () => fetch('http://127.0.0.1:3300/health').then(r => r.text()) }
-// 替代 exec pm2 restart marginalia  
-{ name: 'service_restart', handler: ({service}) => execShell('pm2 restart ' + service, ...) }
-```
-
-模型调用的是结构化工具,中转站看到的只是 `health_check()`,看不到端口号和命令行。服务多了会占 tool definition token,权衡取舍。
-
-### 次安全:用 exec 但降权
-
-如果需要保留 exec 的灵活性,**必须降权到独立用户**:
-
-```bash
-# 创建沙箱用户
-useradd -r -s /bin/bash -m execuser
-# ubuntu 可以免密切换到 execuser
-echo "ubuntu ALL=(execuser) NOPASSWD: ALL" > /etc/sudoers.d/execuser
-# 锁住敏感文件
-chmod 600 ~/.ssh/* models.json .env
-chmod 750 ~
-```
-
-然后设环境变量 `EXEC_USER=execuser`,tools.mjs 会自动用 `sudo -u execuser` 跑所有命令。execuser 读不了你的 SSH 密钥、API key、网关源码——Linux 文件权限硬挡,不靠正则。
-
-### 兜底:输出脱敏(不管哪种方案都要加)
-
-即便拆成了独立工具,服务返回的内容本身可能含敏感信息(比如日志里打了 IP,记忆库里存了配置)。`sanitizeOutput()` 在 tools.mjs 里自动洗:
-
-- IP 地址 → `[IP]`
-- 家目录路径 → `/home/[USER]`
-- SSH 配置 → `[REDACTED]`  
-- API key 模式 (sk-/wrk-/token-) → `[KEY]`
-- 环境变量赋值 → `[ENV_VAR]`
-
-这层正则是最后一道防线——权限没锁住的文件,脱敏接着拦。
-
-### 跨服务器 SSH
-
-如果需要 exec 连到另一台机器(比如修远程服务),**不要复用主用户的 SSH 密钥**:
-
-1. 给 execuser 单独生成密钥: `sudo -u execuser ssh-keygen`
-2. 远程机器创建低权限维修工用户: `useradd mechanic`
-3. mechanic 只能查日志/重启服务,不能读配置
-4. 公钥加到 mechanic 的 authorized_keys
-
-三层降权:中转站 → execuser(沙箱) → mechanic(维修工)。
-
-服务器默认只绑 `127.0.0.1`。
 
 ## License
 
