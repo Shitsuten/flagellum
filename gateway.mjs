@@ -207,7 +207,13 @@ export async function handleChat(reqBody, res) {
         toolResults.push({ type: 'tool_result', tool_use_id: tub.id, content: resultText });
         // 自定义 SSE 事件,客户端可以实时渲染工具结果
         // (按 Anthropic 格式解析的客户端会忽略未知事件类型)
-        emit(res, { type: 'gateway_tool_result', tool_use_id: tub.id, content: resultText.slice(0, 600) });
+        emit(res, {
+          type: 'gateway_tool_result',
+          tool_use_id: tub.id,
+          name: tub.name,
+          input: tub.input || {},
+          content: resultText.slice(0, 600)
+        });
         console.log('[tools] ' + tub.name + ' -> ' + resultText.slice(0, 100));
       }
       loopMessages.push({ role: 'user', content: toolResults });

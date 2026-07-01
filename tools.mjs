@@ -12,7 +12,7 @@ const MEMORY_URL = process.env.MEMORY_URL || 'http://127.0.0.1:3900';
 
 export const BUILTIN_TOOLS = [{
   name: 'exec',
-  description: 'Run a shell command on the host this gateway lives on. Returns stdout and stderr. 60s timeout; use nohup for long jobs. SECURITY: enables arbitrary command execution as the gateway process — only expose on a private, authenticated gateway.',
+  description: 'Run a shell command on the host this gateway lives on. Returns stdout and stderr. 60s timeout; use nohup for long jobs. SECURITY: enables arbitrary command execution; set EXEC_USER to run commands as a low-privilege sandbox user, and only expose this on a private, authenticated gateway.',
   input_schema: {
     type: 'object',
     properties: {
@@ -51,23 +51,51 @@ export const BUILTIN_TOOLS = [{
 // ============================================================
 
 const EXEC_USER = process.env.EXEC_USER || '';  // 空 = 不降权(危险),建议设为沙箱用户名
+const EXEC_HOME = process.env.EXEC_HOME || (EXEC_USER ? `/home/${EXEC_USER}` : (process.env.HOME || '/tmp'));
+const EXEC_CWD = process.env.EXEC_CWD || '/tmp';
+const EXEC_MENU = process.env.EXEC_MENU || '';
 
 const BLOCKED_CMD = /^\s*(rm\s+-r|dd\s+if=|mkfs|shutdown|reboot|passwd|chmod\s+777|iptables\s+-[FXD]|>\s*\/etc)/i;
 const SSH_DANGER = /ssh\s+\S+\s+.*(rm\s+-r|dd\s+if|mkfs|shutdown|reboot|passwd|chmod\s+777|iptables\s+-[FXD]|>\s*\/etc)/i;
 const SELF_PROTECT = /gateway\.mjs|server\.mjs|tools\.mjs|sanitize|callBuiltin/i;
-const WRITE_CMD = /(sed|vim?|nano|echo.*>|tee|cp|mv|rm|cat.*>|truncate|dd)/i;
+const TOUCH_CORE = /(sed|vim?|nano|echo.*>|tee|cp|mv|rm|cat.*>|truncate|dd|head|tail|less|more)/i;
+const SERVICE_DUMP = /\b(cat|less|more)\s+\/opt\/(?:SERVICE|SERVER|MENU)\.md\b|\bcat\s+\/opt\/\*\.md\b|\bsed\s+-n\s+['"]?\d+,\d+p['"]?\s+\/opt\/SERVICE\.md\b/i;
 
 function sanitizeOutput(text) {
   return text
     .replace(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g, '[IP]')
     .replace(/\/home\/\w+/g, '/home/[USER]')
     .replace(/\/root/g, '/[ROOT]')
-    .replace(/.ssh\/[^\s]+/g, '.ssh/[REDACTED]')
+    .replace(/\.ssh\/[^\s]+/g, '.ssh/[REDACTED]')
+    .replace(/([?&]token=)[^&\s"']+/gi, '$1[REDACTED]')
+    .replace(/"token"\s*:\s*"[^"]+"/gi, '"token":"[REDACTED]"')
     .replace(/\b(sk|wrk|key|token|secret|password|passwd)[-_][A-Za-z0-9_-]{8,}\b/gi, '[KEY]')
     .replace(/[A-Z_]{3,}=["']?[^\s"']{8,}["']?/g, '[ENV_VAR]')
     .replace(/HostName\s+\S+/g, 'HostName [REDACTED]')
     .replace(/User\s+\w+/g, 'User [REDACTED]')
     .replace(/IdentityFile\s+\S+/g, 'IdentityFile [REDACTED]');
+}
+
+function shellQuote(value) {
+  return "'" + String(value).replace(/'/g, "'\"'\"'") + "'";
+}
+
+function buildExecCommand(cmd) {
+  const runUser = EXEC_USER || process.env.USER || 'exec';
+  const shell = [
+    'env',
+    `HOME=${shellQuote(EXEC_HOME)}`,
+    `USER=${shellQuote(runUser)}`,
+    `LOGNAME=${shellQuote(runUser)}`,
+    'bash',
+    '-lc',
+    shellQuote(cmd)
+  ].join(' ');
+  return EXEC_USER ? `sudo -u ${shellQuote(EXEC_USER)} -- ${shell}` : shell;
+}
+
+function execMenuForCommand() {
+  return EXEC_MENU.trim() ? `\n\n---\n${EXEC_MENU.trim()}` : '';
 }
 
 export async function callBuiltinTool(name, input) {
@@ -78,18 +106,21 @@ export async function callBuiltinTool(name, input) {
       console.warn('[exec-guard] BLOCKED:', cmd.slice(0, 200));
       return '[blocked] 危险命令被拦截。';
     }
-    if (SELF_PROTECT.test(cmd) && WRITE_CMD.test(cmd)) {
+    if (SELF_PROTECT.test(cmd) && TOUCH_CORE.test(cmd)) {
       console.warn('[exec-guard] SELF-PROTECT:', cmd.slice(0, 200));
-      return '[blocked] 不允许修改网关核心文件。';
+      return '[blocked] 不允许读取或修改网关核心文件。';
     }
-    const prefix = EXEC_USER ? `sudo -u ${EXEC_USER} ` : '';
+    if (SERVICE_DUMP.test(cmd)) {
+      console.warn('[exec-guard] SERVICE-DUMP:', cmd.slice(0, 200));
+      return '[blocked] SERVICE.md 一类服务地图不应整篇输出。请 grep 具体服务名、端口或 endpoint。' + execMenuForCommand();
+    }
     return new Promise(resolve => {
-      execShell(prefix + cmd, { timeout: 60000, maxBuffer: 1024 * 1024, cwd: process.env.EXEC_CWD || '/tmp' }, (err, stdout, stderr) => {
+      execShell(buildExecCommand(cmd), { timeout: 60000, maxBuffer: 1024 * 1024, cwd: EXEC_CWD }, (err, stdout, stderr) => {
         let out = (stdout || '') + (stderr ? '\n[stderr] ' + stderr : '');
         if (err && !out) out = 'error: ' + err.message;
         else if (err?.killed) out += '\n[killed: 60s timeout]';
         if (out.length > 8000) out = out.slice(0, 8000) + '\n…(truncated)';
-        resolve(sanitizeOutput(out.trim() || '(no output)'));
+        resolve(sanitizeOutput(out.trim() || '(no output)') + execMenuForCommand());
       });
     });
   }

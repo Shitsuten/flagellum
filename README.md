@@ -56,9 +56,16 @@ chmod 600 ~/.ssh/* models.json .env
 chmod 750 ~
 ```
 
-然后设环境变量 `EXEC_USER=execuser`,tools.mjs 会自动用 `sudo -u execuser` 跑所有命令。execuser 读不了你的 SSH 密钥、API key、网关源码——Linux 文件权限硬挡,不靠正则。
+然后设环境变量 `EXEC_USER=execuser`,tools.mjs 会自动用 `sudo -u execuser -- env ... bash -lc <command>` 跑**整条命令**。这点很重要:不能只在命令前面拼一个 `sudo -u execuser`,否则 `whoami && cat ~/.ssh/config` 里 `&&` 后面的部分可能会回到网关进程用户执行。execuser 读不了你的 SSH 密钥、API key、网关源码——Linux 文件权限硬挡,不靠正则。
 
-### 兜底:输出脱敏(不管哪种方案都要加)
+相关环境变量:
+
+- `EXEC_USER` — 沙箱用户;为空时不降权,只适合本机开发
+- `EXEC_HOME` — 沙箱 HOME,默认 `/home/$EXEC_USER`
+- `EXEC_CWD` — 命令工作目录,默认 `/tmp`
+- `EXEC_MENU` — 可选的短服务菜单,会追加到 exec 结果后面,用于告诉模型常用服务入口
+
+### 兜底:输出脱敏和大文档拦截(不管哪种方案都要加)
 
 即便拆成了独立工具,服务返回的内容本身可能含敏感信息(比如日志里打了 IP,记忆库里存了配置)。`sanitizeOutput()` 在 tools.mjs 里自动洗:
 
@@ -66,9 +73,12 @@ chmod 750 ~
 - 家目录路径 → `/home/[USER]`
 - SSH 配置 → `[REDACTED]`  
 - API key 模式 (sk-/wrk-/token-) → `[KEY]`
+- URL query / JSON 里的 token → `[REDACTED]`
 - 环境变量赋值 → `[ENV_VAR]`
 
 这层正则是最后一道防线——权限没锁住的文件,脱敏接着拦。
+
+如果你在机器上放了 `SERVICE.md` 这类服务地图,不要让模型整篇 `cat` 出来。tools.mjs 默认拦截 `/opt/SERVICE.md`、`/opt/*.md` 一类大范围读取,提示模型用 `grep` 查具体服务名、端口或 endpoint。更推荐把短菜单放进 `EXEC_MENU`,详细教程在模型真的要用某个服务时再让它 grep 相关片段。
 
 ### 跨服务器 SSH
 
@@ -170,7 +180,7 @@ curl -N http://127.0.0.1:3800/chat \
   -d '{"messages":[{"role":"user","content":"看一下这台机器的磁盘还剩多少"}]}'
 ```
 
-响应是 Anthropic 格式的 SSE 流,外加一种自定义事件 `gateway_tool_result`(工具执行结果,方便客户端实时渲染;按标准格式解析的客户端会自动忽略它)。流空闲超过 14 秒时会发 `: ping` 注释帧保活,SSE parser 会自动忽略。
+响应是 Anthropic 格式的 SSE 流,外加一种自定义事件 `gateway_tool_result`(包含 `tool_use_id`、工具名、输入和截断后的工具执行结果,方便客户端按收到顺序实时渲染;按标准格式解析的客户端会自动忽略它)。流空闲超过 14 秒时会发 `: ping` 注释帧保活,SSE parser 会自动忽略。
 
 ## 放在反向代理后面
 
