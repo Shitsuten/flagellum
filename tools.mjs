@@ -54,6 +54,7 @@ const EXEC_USER = process.env.EXEC_USER || '';  // 空 = 不降权(危险),建�
 const EXEC_HOME = process.env.EXEC_HOME || (EXEC_USER ? `/home/${EXEC_USER}` : (process.env.HOME || '/tmp'));
 const EXEC_CWD = process.env.EXEC_CWD || '/tmp';
 const EXEC_MENU = process.env.EXEC_MENU || '';
+const EXEC_RECIPES_JSON = process.env.EXEC_RECIPES_JSON || '';
 
 const BLOCKED_CMD = /^\s*(rm\s+-r|dd\s+if=|mkfs|shutdown|reboot|passwd|chmod\s+777|iptables\s+-[FXD]|>\s*\/etc)/i;
 const SSH_DANGER = /ssh\s+\S+\s+.*(rm\s+-r|dd\s+if|mkfs|shutdown|reboot|passwd|chmod\s+777|iptables\s+-[FXD]|>\s*\/etc)/i;
@@ -94,8 +95,53 @@ function buildExecCommand(cmd) {
   return EXEC_USER ? `sudo -u ${shellQuote(EXEC_USER)} -- ${shell}` : shell;
 }
 
-function execMenuForCommand() {
-  return EXEC_MENU.trim() ? `\n\n---\n${EXEC_MENU.trim()}` : '';
+let execRecipesCache = null;
+
+function loadExecRecipes() {
+  if (execRecipesCache !== null) return execRecipesCache;
+  if (!EXEC_RECIPES_JSON.trim()) {
+    execRecipesCache = {};
+    return execRecipesCache;
+  }
+  try {
+    const parsed = JSON.parse(EXEC_RECIPES_JSON);
+    execRecipesCache = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (e) {
+    console.warn('[exec-menu] failed to parse EXEC_RECIPES_JSON:', e.message);
+    execRecipesCache = {};
+  }
+  return execRecipesCache;
+}
+
+function recipeAliases(name, recipe) {
+  const aliases = [name];
+  if (recipe && typeof recipe === 'object' && !Array.isArray(recipe) && Array.isArray(recipe.aliases)) {
+    aliases.push(...recipe.aliases);
+  }
+  return aliases.map(x => String(x || '').trim().toLowerCase()).filter(Boolean);
+}
+
+function recipeLines(recipe) {
+  if (Array.isArray(recipe)) return recipe;
+  if (recipe && typeof recipe === 'object' && Array.isArray(recipe.lines)) return recipe.lines;
+  return [];
+}
+
+function execMenuForCommand(cmd = '') {
+  const recipes = loadExecRecipes();
+  const c = String(cmd || '').toLowerCase();
+  const matched = [];
+
+  for (const [name, recipe] of Object.entries(recipes)) {
+    if (recipeAliases(name, recipe).some(alias => c.includes(alias))) {
+      matched.push(...recipeLines(recipe));
+    }
+  }
+
+  const parts = [];
+  if (EXEC_MENU.trim()) parts.push(EXEC_MENU.trim());
+  if (matched.length) parts.push('recipes:\n  ' + matched.map(String).join('\n  '));
+  return parts.length ? `\n\n---\n${parts.join('\n')}` : '';
 }
 
 export async function callBuiltinTool(name, input) {
@@ -112,7 +158,7 @@ export async function callBuiltinTool(name, input) {
     }
     if (SERVICE_DUMP.test(cmd)) {
       console.warn('[exec-guard] SERVICE-DUMP:', cmd.slice(0, 200));
-      return '[blocked] SERVICE.md 一类服务地图不应整篇输出。请 grep 具体服务名、端口或 endpoint。' + execMenuForCommand();
+      return '[blocked] SERVICE.md 一类服务地图不应整篇输出。请 grep 具体服务名、端口或 endpoint。' + execMenuForCommand(cmd);
     }
     return new Promise(resolve => {
       execShell(buildExecCommand(cmd), { timeout: 60000, maxBuffer: 1024 * 1024, cwd: EXEC_CWD }, (err, stdout, stderr) => {
@@ -120,7 +166,7 @@ export async function callBuiltinTool(name, input) {
         if (err && !out) out = 'error: ' + err.message;
         else if (err?.killed) out += '\n[killed: 60s timeout]';
         if (out.length > 8000) out = out.slice(0, 8000) + '\n…(truncated)';
-        resolve(sanitizeOutput(out.trim() || '(no output)') + execMenuForCommand());
+        resolve(sanitizeOutput(out.trim() || '(no output)') + execMenuForCommand(cmd));
       });
     });
   }

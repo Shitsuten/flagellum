@@ -74,6 +74,7 @@ chmod 750 ~
 - `EXEC_HOME` — 沙箱 HOME,默认 `/home/$EXEC_USER`
 - `EXEC_CWD` — 命令工作目录,默认 `/tmp`
 - `EXEC_MENU` — 可选的短服务菜单,会追加到 exec 结果后面,用于告诉模型常用服务入口
+- `EXEC_RECIPES_JSON` — 可选的二级菜单。JSON object,键是服务名,值可以是字符串数组,也可以是 `{ "aliases": [], "lines": [] }`;当本次命令里出现服务名或 alias 时,对应 recipe 会追加到 exec 结果末尾
 
 ### 兜底:输出脱敏和大文档拦截(不管哪种方案都要加)
 
@@ -91,6 +92,28 @@ chmod 750 ~
 危险命令也要在工具层硬拦,不要交给模型自觉。参考实现会拒绝明显破坏性的模式,例如递归删除、磁盘覆写/格式化、关机重启、改密码、`chmod 777`、清空防火墙规则、写入 `/etc` 等;通过 SSH 转发到远端的同类危险命令也会拦。核心配置、密钥、环境文件、SSH 配置、网关源码等路径不允许通过 exec 读取或修改。
 
 如果你在机器上放了 `SERVICE.md` 这类服务地图,不要让模型整篇 `cat` 出来。tools.mjs 默认拦截 `/opt/SERVICE.md`、`/opt/*.md` 一类大范围读取,提示模型用 `grep` 查具体服务名、端口或 endpoint。更推荐把短菜单放进 `EXEC_MENU`,详细教程在模型真的要用某个服务时再让它 grep 相关片段。
+
+层级菜单可以只靠环境变量配置:
+
+```bash
+export EXEC_MENU=$'可用服务:\n  :3900 mem-search\n  :3893 askbox\n提示: 使用或探测服务名/端口后,会追加该服务 recipe。'
+export EXEC_RECIPES_JSON='{
+  "mem-search": {
+    "aliases": ["3900", "memory"],
+    "lines": [
+      "health: curl -s http://127.0.0.1:3900/health",
+      "search: curl -s -X POST http://127.0.0.1:3900/search -H \"Content-Type: application/json\" -d '\''{\"query\":\"TEXT\",\"n\":5}'\''"
+    ]
+  },
+  "askbox": {
+    "aliases": ["3893"],
+    "lines": [
+      "pending: curl -s http://127.0.0.1:3893/api/pending?token=...",
+      "reply: curl -s -X POST http://127.0.0.1:3893/api/reply -H \"Content-Type: application/json\" -d '\''{\"token\":\"...\",\"id\":\"ID\",\"reply\":\"TEXT\"}'\''"
+    ]
+  }
+}'
+```
 
 ### 跨服务器 SSH
 
