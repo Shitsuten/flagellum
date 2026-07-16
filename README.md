@@ -2,7 +2,7 @@
 
 一个最小的流式 tool loop,演示一件事:**内置工具(built-in tools)**。
 
-当网关和工具住在同一台你自己的机器上、服务的是同一个人时,模型调 `exec`(跑 shell 命令)和 `recall`(查长期记忆)可以直接在网关进程内执行——不需要 MCP,不需要协议往返,不需要再开一个服务。MCP 是用来够到**不属于你的**工具的;自己机器上的东西,不用绕那个圈。
+当网关和工具住在同一台你自己的机器上、服务的是同一个人时,模型调 `exec`(跑 shell 命令)、`recall`(查长期记忆)和 `websearch`(搜索公开网页)可以直接在网关进程内执行——不需要 MCP,不需要协议往返,不需要再开一个服务。MCP 是用来够到**不属于你的**工具的;自己机器上的东西,不用绕那个圈。
 
 这是从一个长期运行的个人助手部署里抽出来的,人格和关系内容都剥掉了,剩下的就是这一层管道。对话持久化、prompt 缓存断点布局、分层记忆系统不在这个仓库里——那些见 [paramecium](https://github.com/Shitsuten/paramecium)。
 
@@ -17,7 +17,7 @@
               │   同时在本端攒出完整的 content blocks
               │
               └── stop_reason == "tool_use" 时:
-                    ├── exec / recall  → 进程内直接执行(tools.mjs)
+                    ├── exec / recall / websearch → 进程内直接执行(tools.mjs)
                     ├── 其他名字       → fall through 到 MCP(mcp.mjs)
                     └── 结果塞回对话,发起下一轮,直到模型正常收尾
 ```
@@ -26,7 +26,7 @@
 
 | 文件 | 职责 |
 |------|------|
-| `tools.mjs` | 两个内置工具的定义和执行 |
+| `tools.mjs` | 三个内置工具的定义和执行 |
 | `mcp.mjs` | 最小 MCP 客户端,只做 fall-through |
 | `gateway.mjs` | 流式透传 + tool loop |
 | `server.mjs` | 无状态 demo 服务器 |
@@ -43,6 +43,10 @@ POST /raw-search   { query, n }  →  { results: [{ content, date, source, role 
 ```
 
 记忆服务本体不在这个仓库——任何实现了这两个端点的服务都能接上,参考实现见 paramecium。没有记忆服务时 recall 会优雅地报错,不影响 exec 和正常对话。
+
+**`websearch`** — 搜索公开网页,返回标题、URL、发布时间和摘要。默认读取 Bing 的 RSS 搜索结果,不需要 API key;`count` 默认 5、最多 8。模型只接触结构化结果,不需要自己拼 URL、跑 curl 或解析整张 HTML。返回值明确标记为不可信外部内容,网页里的文字只能作为资料,不能当作指令执行。
+
+默认端点适合个人、非商业部署。也可以用 `WEBSEARCH_URL` 换成兼容 `?format=rss&q=...` 的 RSS 搜索端点。
 
 ## 为什么不全走 MCP
 
@@ -63,6 +67,7 @@ node server.mjs
 监听 `127.0.0.1:3800`。可选环境变量:
 
 - `MEMORY_URL` — recall 代理的记忆服务地址,默认 `http://127.0.0.1:3900`
+- `WEBSEARCH_URL` — websearch 使用的 RSS 搜索端点,默认 `https://www.bing.com/search`
 - `MCP_SERVERS` — 每行一个 streamable-http 端点 URL,留空则只有内置工具
 - `ANTHROPIC_BASE_URL` — 换 API 端点(代理等),默认官方 `/v1/messages`
 - `PORT` — 默认 3800

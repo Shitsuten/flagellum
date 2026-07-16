@@ -2,7 +2,7 @@
 //  flagellum — 流式 tool loop
 //
 //  把 Anthropic 的 SSE 流原样转发给客户端,同时在本端攒出完整的
-//  content blocks。模型停在 tool_use 时:内置工具(exec/recall)
+//  content blocks。模型停在 tool_use 时:内置工具(exec/recall/websearch)
 //  直接进程内执行,不认识的名字 fall through 到 MCP,把结果塞回
 //  对话再发起下一轮,直到模型正常收尾。
 // ============================================================
