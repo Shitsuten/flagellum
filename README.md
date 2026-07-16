@@ -6,6 +6,128 @@
 
 这是从一个长期运行的个人助手部署里抽出来的,人格和关系内容都剥掉了,剩下的就是这一层管道。对话持久化、prompt 缓存断点布局、分层记忆系统不在这个仓库里——那些见 [paramecium](https://github.com/Shitsuten/paramecium)。
 
+## 两种内置工具
+
+这个项目提供两种内置工具:
+
+- **`recall`** — 查长期记忆。只读,不碰 shell,安全性高。通常情况下 recall 就够了——模型需要翻记忆的时候调它,拿到结果,继续对话。
+- **`exec`** — 在主机上跑 shell 命令。适合把本机已有服务、脚本、文件和小自动化整合成一个统一入口。强大但危险;如果你只需要查记忆,不要启用 exec,只用 recall 即可。
+
+这两个工具不是孤零零的按钮,而是一套递进菜单:
+
+- **工具菜单不是说明书,是上下文里的 UI。** 网关不把整本运维文档塞给模型,只在工具结果末尾追加短菜单:当前可用服务、下一步常用入口、少量安全提醒。模型先看到一级菜单,真的需要某个能力时再调用工具拿二级 recipe。
+- **工具层级把“能做什么”和“怎么做”拆开。** 顶层只暴露 `recall` / `exec` 这类少数能力;`recall` 负责回忆,`exec` 才进入服务器侧操作;进入 `exec` 后再按服务、端口、API 路径逐层展开。prompt 保持干净,模型也不必乱翻文件找入口。
+- **记忆、工具、缓存各走各的层。** 稳定画像和系统提示放缓存前缀,轻量目录放注入层,原文只在 recall 时取;工具结果只在 tool loop 中回灌,需要时实时推给前端。每层都能解释自己为什么存在,也能单独关掉验尸。
+- **权限边界写进架构,不是靠模型自觉。** `exec` 可以降权运行、限制工作目录、拦危险命令、脱敏输出;模型看到的是菜单和结果,不是裸奔的服务器。自由度留给可恢复的操作,密钥和核心配置不交给“我会小心”的幻觉。
+- **层级架构便于换模型和换前端。** 前端只管发消息和收 SSE;网关管格式转换、缓存、工具循环;记忆服务管检索和档案;后台只负责观察。Anthropic / OpenRouter / 兼容端点可以换,前端形态也可以换,核心行为仍然落在同一套层级里。
+
+以下安全段**主要针对 exec**。recall 只需要注意输出脱敏(记忆内容可能含敏感信息,下面的 `sanitizeOutput` 建议也应用于 recall 的返回结果)。
+
+## ⚠️ 安全(针对 exec)
+
+`exec` 在这里的主要用途不是“临时救火”,而是**个人服务整合层**:让模型用一个受限 shell 入口调用本机已经跑着的服务、脚本和数据文件,比如查状态、写日志、点歌、整理小页面、读取本地只读资料。它适合私有网关里的日常编排,前提是服务边界清楚、权限降到独立用户、输出经过脱敏。
+
+不建议把 exec 当成全权限运维入口。原因有二:一是安全——即便加了以下所有防护,exec 的命令和输出仍可能经过第三方 API 通道;二是成本——带 tools 的编程/维护任务 token 消耗更高。**系统级任务(改 nginx、动密钥、部署核心服务、跨机器 SSH)能用官方客户端(Claude Code 等)或人工操作就用它们**,flagellum 里的 exec 更适合受限范围内的服务编排。
+
+`exec` 就是任意命令执行。我们自己用中转站时踩过坑——exec 的命令和输出**经过中转站明文可见**,SSH 配置、文件列表、服务器拓扑全暴露了。以下是踩完坑后的安全分级:
+
+### 前提:选对你的 API 通道
+
+使用这些工具时,建议通过**官方 Anthropic API 直连**或 **OpenRouter** 这类有商业信誉的大型中转站。大站偷看用户数据的代价是毁灭性的(整个商业模式崩溃),小站没有这个约束。**即便如此,仍然建议加上以下所有防护措施**——信任中转站不等于把门打开。
+
+### 前端工具开关
+
+建议前端加一个工具总开关——关掉后发给 API 的请求不带 `tools` 字段,模型变成纯聊天模式。用途:当你从官方 API / OR 切换到其他中转站继续聊天时,一键关掉工具,避免模型根据上下文自动调用 exec 并将命令和输出暴露给不受信任的中转站。开关只控制请求里有没有 tools,不影响对话内容和记忆。
+
+### 最安全:不用 exec
+
+把常用操作拆成独立工具(类似 MCP,但可以是进程内的):
+
+```js
+// 替代 exec curl 127.0.0.1:3300/health
+{ name: 'health_check', handler: () => fetch('http://127.0.0.1:3300/health').then(r => r.text()) }
+// 替代 exec pm2 restart marginalia  
+{ name: 'service_restart', handler: ({service}) => execShell('pm2 restart ' + service, ...) }
+```
+
+模型调用的是结构化工具,中转站看到的只是 `health_check()`,看不到端口号和命令行。服务多了会占 tool definition token,权衡取舍。
+
+### 次安全:用 exec 但降权
+
+如果需要保留 exec 的灵活性,**必须降权到独立用户**:
+
+```bash
+# 创建沙箱用户
+useradd -r -s /bin/bash -m execuser
+# ubuntu 可以免密切换到 execuser
+echo "ubuntu ALL=(execuser) NOPASSWD: ALL" > /etc/sudoers.d/execuser
+# 锁住敏感文件
+chmod 600 ~/.ssh/* models.json .env
+chmod 750 ~
+```
+
+然后设环境变量 `EXEC_USER=execuser`,tools.mjs 会自动用 `sudo -u execuser -- env ... bash -lc <command>` 跑**整条命令**。这点很重要:不能只在命令前面拼一个 `sudo -u execuser`,否则 `whoami && cat ~/.ssh/config` 里 `&&` 后面的部分可能会回到网关进程用户执行。execuser 读不了你的 SSH 密钥、API key、网关源码——Linux 文件权限硬挡,不靠正则。
+
+相关环境变量:
+
+- `EXEC_USER` — 沙箱用户;为空时不降权,只适合本机开发
+- `EXEC_HOME` — 沙箱 HOME,默认 `/home/$EXEC_USER`
+- `EXEC_CWD` — 命令工作目录,默认 `/tmp`
+- `EXEC_MENU` — 可选的短服务菜单,会追加到 exec 结果后面,用于告诉模型常用服务入口
+- `EXEC_RECIPES_JSON` — 可选的二级菜单。JSON object,键是服务名,值可以是字符串数组,也可以是 `{ "aliases": [], "lines": [] }`;当本次命令里出现服务名或 alias 时,对应 recipe 会追加到 exec 结果末尾
+
+### 兜底:输出脱敏和大文档拦截(不管哪种方案都要加)
+
+即便拆成了独立工具,服务返回的内容本身可能含敏感信息(比如日志里打了 IP,记忆库里存了配置)。`sanitizeOutput()` 在 tools.mjs 里自动洗:
+
+- IP 地址 → `[IP]`
+- 家目录路径 → `/home/[USER]`
+- SSH 配置 → `[REDACTED]`  
+- API key 模式 (sk-/wrk-/token-) → `[KEY]`
+- URL query / JSON 里的 token → `[REDACTED]`
+- 环境变量赋值 → `[ENV_VAR]`
+
+这层正则是最后一道防线——权限没锁住的文件,脱敏接着拦。
+
+危险命令也要在工具层硬拦,不要交给模型自觉。参考实现会拒绝明显破坏性的模式,例如递归删除、磁盘覆写/格式化、关机重启、改密码、`chmod 777`、清空防火墙规则、写入 `/etc` 等;通过 SSH 转发到远端的同类危险命令也会拦。核心配置、密钥、环境文件、SSH 配置、网关源码等路径不允许通过 exec 读取或修改。
+
+如果你在机器上放了 `SERVICE.md` 这类服务地图,不要让模型整篇 `cat` 出来。tools.mjs 默认拦截 `/opt/SERVICE.md`、`/opt/*.md` 一类大范围读取,提示模型用 `grep` 查具体服务名、端口或 endpoint。更推荐把短菜单放进 `EXEC_MENU`,详细教程在模型真的要用某个服务时再让它 grep 相关片段。
+
+层级菜单可以只靠环境变量配置:
+
+```bash
+export EXEC_MENU=$'可用服务:\n  :3900 mem-search\n  :3893 askbox\n提示: 使用或探测服务名/端口后,会追加该服务 recipe。'
+export EXEC_RECIPES_JSON='{
+  "mem-search": {
+    "aliases": ["3900", "memory"],
+    "lines": [
+      "health: curl -s http://127.0.0.1:3900/health",
+      "search: curl -s -X POST http://127.0.0.1:3900/search -H \"Content-Type: application/json\" -d '\''{\"query\":\"TEXT\",\"n\":5}'\''"
+    ]
+  },
+  "askbox": {
+    "aliases": ["3893"],
+    "lines": [
+      "pending: curl -s http://127.0.0.1:3893/api/pending?token=...",
+      "reply: curl -s -X POST http://127.0.0.1:3893/api/reply -H \"Content-Type: application/json\" -d '\''{\"token\":\"...\",\"id\":\"ID\",\"reply\":\"TEXT\"}'\''"
+    ]
+  }
+}'
+```
+
+### 跨服务器 SSH
+
+如果需要 exec 连到另一台机器(比如修远程服务),**不要复用主用户的 SSH 密钥**:
+
+1. 给 execuser 单独生成密钥: `sudo -u execuser ssh-keygen`
+2. 远程机器创建低权限维修工用户: `useradd mechanic`
+3. mechanic 只能查日志/重启服务,不能读配置
+4. 公钥加到 mechanic 的 authorized_keys
+
+三层降权:中转站 → execuser(沙箱) → mechanic(维修工)。
+
+服务器默认只绑 `127.0.0.1`。
+
 ## 它怎么工作
 
 ```
@@ -54,6 +176,24 @@ POST /raw-search   { query, n }  →  { results: [{ content, date, source, role 
 2. **工具定义字节级稳定。** 工具定义排在 prompt 缓存前缀的最前面,内置工具的定义写死在代码里、顺序固定,永远不会因为某个 MCP 服务抖动而打破整条缓存前缀。
 3. **两者共存,不用二选一。** 模型调了内置工具不认识的名字,自动 fall through 到 MCP。远程服务照常接 MCP,本机的事情进程内做。
 
+## exec 是万能撬锁片,但它需要一张地图
+
+放弃 MCP 的同时也放弃了它的 schema:模型拿到 exec 之后什么门都能试着开,但端口号、endpoint 路径、认证方式得自己知道。没有 schema 兜底,错了就是 400 或者静默失败——要么模型每次先跑一轮 `grep` 去查(多一整轮工具往返,我们的 504 postmortem 里那次事故恰好就是被一次查端口的 grep 触发的),要么环境知识得放在一个它天生就看得见的地方。
+
+试过的选项和结论:
+
+- **长期记忆里** ✗ — 基础设施事实不是记忆,语义检索对"3300是谁"这种查表问题不可靠
+- **机器上放一个 SERVICE.md 靠 exec 去 grep** △ — 可以,但常用查询每次多一轮往返
+- **system prompt 里放一个紧凑表** △ — 可以但有安全代价:端口和服务拓扑每条消息都经过中转站明文可见,等于把地图广播给所有中间人
+- **exec 的 tool description 里** ✓ — 端口表写在 exec 工具的 description 字段里,模型调 exec 前就知道能干什么,且只在模型真正需要调工具时才出现在请求里。示例见 `tools.mjs` 里 exec 的 description
+
+```js
+// tools.mjs 里的 exec description 示例
+description: '在VPS上执行shell命令(沙箱execuser)。可用服务: 3300 marginalia | 3600 heartbeat | 3900 mem-search | ...'
+```
+
+之前我们的做法是放在 system prompt 的缓存段里(token 几乎免费),后来出于安全考虑(减少中转站看到的拓扑信息)迁移到了 tool description。如果你不经过中转站(直连官方 API),放 system prompt 里仍然是最省事的选择。
+
 ## 运行
 
 需要 Node 18+,没有任何 npm 依赖。
@@ -80,11 +220,27 @@ curl -N http://127.0.0.1:3800/chat \
   -d '{"messages":[{"role":"user","content":"看一下这台机器的磁盘还剩多少"}]}'
 ```
 
-响应是 Anthropic 格式的 SSE 流,外加一种自定义事件 `gateway_tool_result`(工具执行结果,方便客户端实时渲染;按标准格式解析的客户端会自动忽略它)。
+响应是 Anthropic 格式的 SSE 流,外加一种自定义事件 `gateway_tool_result`(包含 `tool_use_id`、工具名、输入和截断后的工具执行结果,方便客户端按收到顺序实时渲染;按标准格式解析的客户端会自动忽略它)。流空闲超过 14 秒时会发 `: ping` 注释帧保活,SSE parser 会自动忽略。
 
-## ⚠️ 安全
+## 放在反向代理后面
 
-`exec` 就是任意命令执行,以网关进程的身份跑。这个东西的设计前提是:**私有主机、有认证、单个受信任的用户**。绝对不要把它裸露在公网上,也不要给不受信任的调用方。服务器默认只绑 `127.0.0.1`。
+这一节是用一个真实的 504 换来的——完整的踩坑记录见 [POSTMORTEM.md](POSTMORTEM.md),这套东西发布当晚就在生产环境翻了车,值得一读。
+
+工具执行期间(exec 最长能跑 60 秒)SSE 流上**一个字节都没有**,而 nginx 的 `proxy_read_timeout` 默认正好也是 60 秒,Cloudflare 的空闲超时约 100 秒——一条慢命令就能让代理在网关还在干活的时候把连接掐掉,客户端看到 504,网关这边毫无知觉。
+
+网关侧的根治是上面说的空闲保活 ping(任何长度的工具执行,静默都不会超过 ~19 秒)。代理侧配合两件事:
+
+```nginx
+location /chat {
+    proxy_pass http://127.0.0.1:3800;
+    proxy_http_version 1.1;
+    proxy_set_header Connection "";
+    proxy_buffering off;            # SSE 必须关 buffering,否则 ping 也救不了
+    proxy_read_timeout 600s;        # tool loop 可以合法地跑几分钟
+}
+```
+
+另外所有出网关的 fetch(recall 的记忆服务、MCP 握手)都带 `AbortSignal.timeout`:MCP 握手发生在响应头写出之前,一个挂死的依赖服务会把整个请求堵在 `writeHead` 前面——那是 ping 都救不了的死法,只能靠超时降级。
 
 ## License
 

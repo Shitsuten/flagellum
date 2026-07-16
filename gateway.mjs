@@ -164,6 +164,18 @@ export async function handleChat(reqBody, res) {
 
   res.writeHead(200, sseHeaders());
 
+  // SSE 保活:工具执行期间(exec 最长 60 秒)流上一个字节都没有,
+  // 反向代理的空闲超时会把连接掐掉(nginx 默认 60s、Cloudflare ~100s),
+  // 客户端看到的就是 504。空闲守卫:只在静默超过 14 秒时发一帧注释,
+  // 保证 ping 永远不会插进一个只透传了一半的 event 中间。
+  const origWrite = res.write.bind(res);
+  let lastWrite = Date.now();
+  res.write = (...a) => { lastWrite = Date.now(); return origWrite(...a); };
+  const pingTimer = setInterval(() => {
+    if (!res.writableEnded && Date.now() - lastWrite > 14000) res.write(': ping\n\n');
+  }, 5000);
+  res.once('close', () => clearInterval(pingTimer));
+
   let loopMessages = [...messages];
   let maxLoops = MAX_LOOPS;
 
@@ -195,7 +207,13 @@ export async function handleChat(reqBody, res) {
         toolResults.push({ type: 'tool_result', tool_use_id: tub.id, content: resultText });
         // 自定义 SSE 事件,客户端可以实时渲染工具结果
         // (按 Anthropic 格式解析的客户端会忽略未知事件类型)
-        emit(res, { type: 'gateway_tool_result', tool_use_id: tub.id, content: resultText.slice(0, 600) });
+        emit(res, {
+          type: 'gateway_tool_result',
+          tool_use_id: tub.id,
+          name: tub.name,
+          input: tub.input || {},
+          content: resultText.slice(0, 600)
+        });
         console.log('[tools] ' + tub.name + ' -> ' + resultText.slice(0, 100));
       }
       loopMessages.push({ role: 'user', content: toolResults });

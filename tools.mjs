@@ -14,7 +14,7 @@ const WEBSEARCH_URL = process.env.WEBSEARCH_URL || 'https://www.bing.com/search'
 
 export const BUILTIN_TOOLS = [{
   name: 'exec',
-  description: 'Run a shell command on the host this gateway lives on. Returns stdout and stderr. 60s timeout; use nohup for long jobs. SECURITY: enables arbitrary command execution as the gateway process — only expose on a private, authenticated gateway.',
+  description: 'Run a shell command on the host this gateway lives on. Returns stdout and stderr. 60s timeout; use nohup for long jobs. SECURITY: enables arbitrary command execution; set EXEC_USER to run commands as a low-privilege sandbox user, and only expose this on a private, authenticated gateway.',
   input_schema: {
     type: 'object',
     properties: {
@@ -112,17 +112,139 @@ async function websearch(input) {
 }
 
 // 返回工具结果字符串;名字不认识时返回 null,由调用方 fall through 到 MCP
+// ============================================================
+//  exec 安全层 (2026-06-14)
+//
+//  如果你用的是中转站(非直连 Anthropic),exec 的命令和输出都经过
+//  第三方明文可见。以下措施分三层:
+//
+//  1. 用户隔离 — EXEC_USER 指定一个低权限沙箱用户,跑 sudo -u
+//     这个用户读不了你的 ~/.ssh/、密钥、网关源码
+//  2. 命令黑名单 — 拦截 rm -r、dd、shutdown 等破坏性命令
+//  3. 输出脱敏 — IP/路径/密钥/SSH配置自动替换
+//
+//  最安全的做法是不用 exec,把服务拆成独立 MCP 工具。
+//  次安全是用 exec + 以下三层防护。
+//  不管哪种,网关层都应该加输出脱敏正则兜底。
+// ============================================================
+
+const EXEC_USER = process.env.EXEC_USER || '';  // 空 = 不降权(危险),建议设为沙箱用户名
+const EXEC_HOME = process.env.EXEC_HOME || (EXEC_USER ? `/home/${EXEC_USER}` : (process.env.HOME || '/tmp'));
+const EXEC_CWD = process.env.EXEC_CWD || '/tmp';
+const EXEC_MENU = process.env.EXEC_MENU || '';
+const EXEC_RECIPES_JSON = process.env.EXEC_RECIPES_JSON || '';
+
+const BLOCKED_CMD = /^\s*(rm\s+-r|dd\s+if=|mkfs|shutdown|reboot|passwd|chmod\s+777|iptables\s+-[FXD]|>\s*\/etc)/i;
+const SSH_DANGER = /ssh\s+\S+\s+.*(rm\s+-r|dd\s+if|mkfs|shutdown|reboot|passwd|chmod\s+777|iptables\s+-[FXD]|>\s*\/etc)/i;
+const SELF_PROTECT = /gateway\.mjs|server\.mjs|tools\.mjs|sanitize|callBuiltin/i;
+const TOUCH_CORE = /(sed|vim?|nano|echo.*>|tee|cp|mv|rm|cat.*>|truncate|dd|head|tail|less|more)/i;
+const SERVICE_DUMP = /\b(cat|less|more)\s+\/opt\/(?:SERVICE|SERVER|MENU)\.md\b|\bcat\s+\/opt\/\*\.md\b|\bsed\s+-n\s+['"]?\d+,\d+p['"]?\s+\/opt\/SERVICE\.md\b/i;
+
+function sanitizeOutput(text) {
+  return text
+    .replace(/\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/g, '[IP]')
+    .replace(/\/home\/\w+/g, '/home/[USER]')
+    .replace(/\/root/g, '/[ROOT]')
+    .replace(/\.ssh\/[^\s]+/g, '.ssh/[REDACTED]')
+    .replace(/([?&]token=)[^&\s"']+/gi, '$1[REDACTED]')
+    .replace(/"token"\s*:\s*"[^"]+"/gi, '"token":"[REDACTED]"')
+    .replace(/\b(sk|wrk|key|token|secret|password|passwd)[-_][A-Za-z0-9_-]{8,}\b/gi, '[KEY]')
+    .replace(/[A-Z_]{3,}=["']?[^\s"']{8,}["']?/g, '[ENV_VAR]')
+    .replace(/HostName\s+\S+/g, 'HostName [REDACTED]')
+    .replace(/User\s+\w+/g, 'User [REDACTED]')
+    .replace(/IdentityFile\s+\S+/g, 'IdentityFile [REDACTED]');
+}
+
+function shellQuote(value) {
+  return "'" + String(value).replace(/'/g, "'\"'\"'") + "'";
+}
+
+function buildExecCommand(cmd) {
+  const runUser = EXEC_USER || process.env.USER || 'exec';
+  const shell = [
+    'env',
+    `HOME=${shellQuote(EXEC_HOME)}`,
+    `USER=${shellQuote(runUser)}`,
+    `LOGNAME=${shellQuote(runUser)}`,
+    'bash',
+    '-lc',
+    shellQuote(cmd)
+  ].join(' ');
+  return EXEC_USER ? `sudo -u ${shellQuote(EXEC_USER)} -- ${shell}` : shell;
+}
+
+let execRecipesCache = null;
+
+function loadExecRecipes() {
+  if (execRecipesCache !== null) return execRecipesCache;
+  if (!EXEC_RECIPES_JSON.trim()) {
+    execRecipesCache = {};
+    return execRecipesCache;
+  }
+  try {
+    const parsed = JSON.parse(EXEC_RECIPES_JSON);
+    execRecipesCache = parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+  } catch (e) {
+    console.warn('[exec-menu] failed to parse EXEC_RECIPES_JSON:', e.message);
+    execRecipesCache = {};
+  }
+  return execRecipesCache;
+}
+
+function recipeAliases(name, recipe) {
+  const aliases = [name];
+  if (recipe && typeof recipe === 'object' && !Array.isArray(recipe) && Array.isArray(recipe.aliases)) {
+    aliases.push(...recipe.aliases);
+  }
+  return aliases.map(x => String(x || '').trim().toLowerCase()).filter(Boolean);
+}
+
+function recipeLines(recipe) {
+  if (Array.isArray(recipe)) return recipe;
+  if (recipe && typeof recipe === 'object' && Array.isArray(recipe.lines)) return recipe.lines;
+  return [];
+}
+
+function execMenuForCommand(cmd = '') {
+  const recipes = loadExecRecipes();
+  const c = String(cmd || '').toLowerCase();
+  const matched = [];
+
+  for (const [name, recipe] of Object.entries(recipes)) {
+    if (recipeAliases(name, recipe).some(alias => c.includes(alias))) {
+      matched.push(...recipeLines(recipe));
+    }
+  }
+
+  const parts = [];
+  if (EXEC_MENU.trim()) parts.push(EXEC_MENU.trim());
+  if (matched.length) parts.push('recipes:\n  ' + matched.map(String).join('\n  '));
+  return parts.length ? `\n\n---\n${parts.join('\n')}` : '';
+}
+
 export async function callBuiltinTool(name, input) {
   if (name === 'exec') {
     const cmd = (input?.command || '').trim();
     if (!cmd) return '(empty command)';
+    if (BLOCKED_CMD.test(cmd) || SSH_DANGER.test(cmd)) {
+      console.warn('[exec-guard] BLOCKED:', cmd.slice(0, 200));
+      return '[blocked] 危险命令被拦截。';
+    }
+    if (SELF_PROTECT.test(cmd) && TOUCH_CORE.test(cmd)) {
+      console.warn('[exec-guard] SELF-PROTECT:', cmd.slice(0, 200));
+      return '[blocked] 不允许读取或修改网关核心文件。';
+    }
+    if (SERVICE_DUMP.test(cmd)) {
+      console.warn('[exec-guard] SERVICE-DUMP:', cmd.slice(0, 200));
+      return '[blocked] SERVICE.md 一类服务地图不应整篇输出。请 grep 具体服务名、端口或 endpoint。' + execMenuForCommand(cmd);
+    }
     return new Promise(resolve => {
-      execShell(cmd, { timeout: 60000, maxBuffer: 1024 * 1024, cwd: process.env.EXEC_CWD || process.cwd() }, (err, stdout, stderr) => {
+      execShell(buildExecCommand(cmd), { timeout: 60000, maxBuffer: 1024 * 1024, cwd: EXEC_CWD }, (err, stdout, stderr) => {
         let out = (stdout || '') + (stderr ? '\n[stderr] ' + stderr : '');
         if (err && !out) out = 'error: ' + err.message;
         else if (err?.killed) out += '\n[killed: 60s timeout]';
         if (out.length > 8000) out = out.slice(0, 8000) + '\n…(truncated)';
-        resolve(out.trim() || '(no output)');
+        resolve(sanitizeOutput(out.trim() || '(no output)') + execMenuForCommand(cmd));
       });
     });
   }
@@ -134,15 +256,19 @@ export async function callBuiltinTool(name, input) {
     if (input?.exact) {
       const r = await fetch(MEMORY_URL + '/raw-search', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query: q, n: 6 })
+        body: JSON.stringify({ query: q, n: 6 }),
+        signal: AbortSignal.timeout(10000)
       });
       const d = await r.json();
       if (!d.results?.length) return '原文检索无结果。提示:逐字匹配整个短语、至少3个字;可换更短的词组,或去掉exact用语义检索。';
       return d.results.map(x => `[${x.date || '?'} ${x.source || ''} ${x.role || ''}] ${x.content}`).join('\n---\n');
     }
+    // 超时降级:记忆服务忙的时候(单线程实现/批量导入)别让一次 recall
+    // 拖死整个 tool loop —— catch 里会变成一条报错字符串还给模型
     const r = await fetch(MEMORY_URL + '/search', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ query: q, n: 5 })
+      body: JSON.stringify({ query: q, n: 5 }),
+      signal: AbortSignal.timeout(10000)
     });
     const d = await r.json();
     if (!d.results?.length) return '没有找到相关记忆';
